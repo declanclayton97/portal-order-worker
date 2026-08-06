@@ -1,7 +1,8 @@
 # Playwright's official image ships Chromium + all system deps preinstalled — the
-# painless way to run a headless browser on Render (no apt juggling). Pin the version
-# to match the playwright dependency in package.json.
-FROM mcr.microsoft.com/playwright:v1.47.0-jammy
+# painless way to run a headless browser on Render (no apt juggling). This tag MUST
+# match the exact `playwright` version in package.json or the browser binary won't be
+# found (they ship together).
+FROM mcr.microsoft.com/playwright:v1.62.1-jammy
 
 WORKDIR /app
 
