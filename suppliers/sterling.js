@@ -141,8 +141,9 @@ export async function stage(page, { lines, creds, keepBasket }) {
   }
   const added = results.filter((r) => r.ok).length;
   const cart = await cartCount(page);
+  const units = lines.reduce((a, l) => a + (Number(l.qty) || 1), 0);   // basket counts units, not lines
   const screenshot = `data:image/png;base64,${(await page.screenshot()).toString('base64')}`;
-  return { cartCount: cart, added, expected: lines.length, ready: added === lines.length && cart === added, cleared, results, screenshot };
+  return { cartCount: cart, added, expected: lines.length, units, ready: added === lines.length && cart === units, cleared, results, screenshot };
 }
 
 export async function place(page) {
