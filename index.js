@@ -46,7 +46,7 @@ async function runOrder({ supplier, ref, lines, opts = {}, execute }) {
     browser = await launch();
     const page = await (await browser.newContext()).newPage();
     await mod.login(page, { user, pass });
-    const staged = await mod.stage(page, { lines, ...opts });
+    const staged = await mod.stage(page, { lines, creds: { user, pass }, ...opts });
     if (!execute) { await browser.close(); return { ok: true, dryRun: true, supplier, ref, ...staged, ms: Date.now() - t0 }; }
     if (!staged.ready) { await browser.close(); return { ok: false, error: 'not ready to place', supplier, ref, ...staged }; }
     const placed = await mod.place(page);

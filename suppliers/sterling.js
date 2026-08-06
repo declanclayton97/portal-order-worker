@@ -70,8 +70,16 @@ async function clearBasket(page) {
 }
 
 // Add ONE line to the basket. Returns { ok, reason }.
-async function addLine(page, line) {
+async function addLine(page, line, creds) {
   const q = searchTerm(line.search, line.colour);
+  // Recover the session/page if it dropped: without the search box (e.g. bounced to
+  // login after many ops), go back to Styles and re-login. Prevents one bad line from
+  // cascading fill-timeouts through the rest of the order.
+  if (!(await page.$('#ctl00_txtsearch'))) {
+    await page.goto(`${config.base}/styles.aspx?f=0`, { waitUntil: 'domcontentloaded' }).catch(() => {});
+    if (creds && (!(await page.$('#ctl00_btnLogout')) || await page.$('#ctl00_Login1_Password'))) { try { await login(page, creds); } catch {} }
+    if (!(await page.$('#ctl00_txtsearch'))) return { ok: false, reason: 'search box unavailable (session recovery failed)' };
+  }
   // search
   await page.fill('#ctl00_txtsearch', q);
   await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), page.click('#ctl00_btnsearch')]);
@@ -102,6 +110,8 @@ async function addLine(page, line) {
     const sizeRe = /^(XXS|XS|S|M|L|XL|XXL|3XL|XXXL|4XL|[1-9]\d?(\.5)?)$/i;   // note: excludes "0"
     const boxes = [...document.querySelectorAll('input[id*="txtqty"]')];
     if (!boxes.length) return { ok: false, reason: 'no size grid' };
+    // "One size" products have a single box (no real size column) — just use it.
+    if (/one\s*size/i.test(size) && boxes.length === 1) { boxes[0].value = String(qty); boxes[0].dispatchEvent(new Event('change', { bubbles: true })); return { ok: true, boxId: boxes[0].id, matchedSize: 'One size' }; }
     const labels = [...document.querySelectorAll('div,span,td,th,b,strong,p')].filter((e) => e.children.length === 0 && sizeRe.test((e.innerText || '').trim()));
     // Trouser sizes come through as "W32" / "L31W34" but the grid columns are the waist
     // number (30,32,34…). Use the waist number when present; else the normalised size.
@@ -122,11 +132,11 @@ async function addLine(page, line) {
   return { ok: true, boxId: set.boxId, matchedSize: set.matchedSize };
 }
 
-export async function stage(page, { lines, keepBasket }) {
+export async function stage(page, { lines, creds, keepBasket }) {
   const cleared = keepBasket ? null : await clearBasket(page);
   const results = [];
   for (const line of lines) {
-    try { results.push({ line: line.search, size: line.size, qty: line.qty, ...(await addLine(page, line)) }); }
+    try { results.push({ line: line.search, size: line.size, qty: line.qty, ...(await addLine(page, line, creds)) }); }
     catch (e) { results.push({ line: line.search, size: line.size, qty: line.qty, ok: false, reason: e.message }); }
   }
   const added = results.filter((r) => r.ok).length;
