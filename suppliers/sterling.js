@@ -16,12 +16,10 @@ export const config = {
 
 export async function login(page, { user, pass }) {
   await page.goto(`${config.base}/AccLogin.aspx`, { waitUntil: 'domcontentloaded' });
-  await page.fill('#TextBox2', user);
-  await page.fill('#TextBox3', pass);
-  await Promise.all([
-    page.waitForNavigation({ waitUntil: 'domcontentloaded' }).catch(() => {}),
-    page.click('#Button2'),
-  ]);
+  await page.fill('#MainContent_TextBox2', user);          // User Name
+  await page.fill('#MainContent_TextBox3', pass);          // Password
+  await page.click('#Button2s');                           // visible "Sign In" (fires the hidden Button2 submit)
+  await page.waitForURL((u) => !/AccLogin/i.test(String(u)), { timeout: 30000 }).catch(() => {});
   if (/AccLogin/i.test(page.url())) throw new Error('Sterling login failed (still on AccLogin)');
 }
 
