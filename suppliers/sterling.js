@@ -15,15 +15,26 @@ export const config = {
 
 export async function login(page, { user, pass }) {
   await page.goto(`${config.base}/styles.aspx?f=0`, { waitUntil: 'domcontentloaded' });
-  if (await page.$('#ctl00_Login1_UserName')) {
-    await page.fill('#ctl00_Login1_UserName', user);
-    await page.fill('#ctl00_Login1_Password', pass);
-    await Promise.all([
-      page.waitForLoadState('domcontentloaded').catch(() => {}),
-      page.click('#ctl00_Login1_LoginButton'),
-    ]);
+  // locate the login fields (email + password) even if IDs differ on the dedicated page
+  const emailSel = (await page.$('#ctl00_Login1_UserName')) ? '#ctl00_Login1_UserName' : 'input[type=text][name*="UserName"], input[id*="UserName"], input[type=email]';
+  const passSel = (await page.$('#ctl00_Login1_Password')) ? '#ctl00_Login1_Password' : 'input[type=password]';
+  const btnSel = (await page.$('#ctl00_Login1_LoginButton')) ? '#ctl00_Login1_LoginButton' : 'input[type=submit][value*="Log" i], input[value="Log In"]';
+  let attempted = false;
+  if (await page.$(passSel)) {
+    attempted = true;
+    await page.fill(emailSel, user).catch(() => {});
+    await page.fill(passSel, pass).catch(() => {});
+    await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), page.click(btnSel).catch(() => {})]);
+    await page.waitForTimeout(500);
   }
-  if (!(await page.$('#ctl00_btnLogout'))) throw new Error('Sterling login failed (no Logout link)');
+  if (!(await page.$('#ctl00_btnLogout'))) {
+    const diag = await page.evaluate(() => ({
+      url: location.href,
+      hasError: /invalid|incorrect|not recognised|failed|try again/i.test(document.body.innerText),
+      inputs: [...document.querySelectorAll('input')].filter((e) => !/^__|VIEWSTATE/i.test(e.name || e.id || '')).map((e) => `${e.type}:${e.id || e.name}`).slice(0, 12),
+    }));
+    throw new Error(`Sterling login failed (attempted=${attempted}, user=${(user || '').slice(0, 3)}***) — ${JSON.stringify(diag)}`);
+  }
 }
 
 // Derive a good search term from the resolved style name: drop a leading/trailing colour
