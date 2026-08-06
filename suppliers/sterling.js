@@ -60,10 +60,13 @@ async function addLine(page, line) {
   await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), page.click('#ctl00_btnsearch')]);
   await page.waitForTimeout(400);
   if (await page.$('text=/no results matching/i')) return { ok: false, reason: `no results for "${q}"` };
-  // Results link to styleinfo.aspx?styleid=<STYLE NAME>. Pick the one whose styleid best
-  // matches our resolved item (disambiguates e.g. APKHT trouser vs APKHT short).
-  const links = await page.$$('a[href*="styleinfo"]');
-  if (!links.length) return { ok: false, reason: `no styleinfo results for "${q}"` };
+  // Results link to styleinfo.aspx?styleid=<STYLE NAME>. Each product has several links
+  // (image + title), some hidden — consider only VISIBLE ones, and pick the styleid that
+  // best matches our resolved item (disambiguates e.g. APKHT trouser vs APKHT short).
+  const allLinks = await page.$$('a[href*="styleinfo"]');
+  const links = [];
+  for (const a of allLinks) { if (await a.isVisible().catch(() => false)) links.push(a); }
+  if (!links.length) return { ok: false, reason: `no visible styleinfo results for "${q}"` };
   const want = String(line.search || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   let target = links[0], best = -1;
   for (const a of links) {
