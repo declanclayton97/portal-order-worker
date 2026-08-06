@@ -103,7 +103,10 @@ async function addLine(page, line) {
     const boxes = [...document.querySelectorAll('input[id*="txtqty"]')];
     if (!boxes.length) return { ok: false, reason: 'no size grid' };
     const labels = [...document.querySelectorAll('div,span,td,th,b,strong,p')].filter((e) => e.children.length === 0 && sizeRe.test((e.innerText || '').trim()));
-    const want = norm(size);
+    // Trouser sizes come through as "W32" / "L31W34" but the grid columns are the waist
+    // number (30,32,34…). Use the waist number when present; else the normalised size.
+    const wm = String(size).match(/w\s*(\d{2})/i);
+    const want = wm ? wm[1] : norm(size);
     for (const box of boxes) {
       const br = box.getBoundingClientRect();
       let lbl = null, bestDy = 1e9;
