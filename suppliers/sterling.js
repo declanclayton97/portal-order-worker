@@ -52,6 +52,23 @@ async function cartCount(page) {
   const m = String(t || '').match(/(\d+)/); return m ? Number(m[1]) : 0;
 }
 
+// Empty the basket so the order is exactly our lines (dry-runs leave items behind).
+// Go to Checkout (the order-lines screen) and click each Delete until none remain.
+async function clearBasket(page) {
+  if (!(await cartCount(page))) return { cleared: 0 };
+  await page.goto(`${config.base}/styles.aspx?f=0`, { waitUntil: 'domcontentloaded' }).catch(() => {});
+  const chk = await page.$('#ctl00_btnbasket');
+  if (chk) { await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), chk.click()]); await page.waitForTimeout(500); }
+  let n = 0;
+  for (let i = 0; i < 40; i++) {
+    const del = await page.$('a[id*="Delete"]:visible, a[id*="delete"]:visible, input[id*="Delete"]:visible');
+    if (!del) break;
+    await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), del.click().catch(() => {})]);
+    await page.waitForTimeout(400); n++;
+  }
+  return { cleared: n, remaining: await cartCount(page) };
+}
+
 // Add ONE line to the basket. Returns { ok, reason }.
 async function addLine(page, line) {
   const q = searchTerm(line.search, line.colour);
@@ -102,7 +119,8 @@ async function addLine(page, line) {
   return { ok: true, boxId: set.boxId, matchedSize: set.matchedSize };
 }
 
-export async function stage(page, { lines }) {
+export async function stage(page, { lines, keepBasket }) {
+  const cleared = keepBasket ? null : await clearBasket(page);
   const results = [];
   for (const line of lines) {
     try { results.push({ line: line.search, size: line.size, qty: line.qty, ...(await addLine(page, line)) }); }
@@ -111,7 +129,7 @@ export async function stage(page, { lines }) {
   const added = results.filter((r) => r.ok).length;
   const cart = await cartCount(page);
   const screenshot = `data:image/png;base64,${(await page.screenshot()).toString('base64')}`;
-  return { cartCount: cart, added, expected: lines.length, ready: added === lines.length, results, screenshot };
+  return { cartCount: cart, added, expected: lines.length, ready: added === lines.length && cart === added, cleared, results, screenshot };
 }
 
 export async function place(page) {
