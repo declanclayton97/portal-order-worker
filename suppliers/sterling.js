@@ -60,42 +60,38 @@ async function addLine(page, line) {
   await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), page.click('#ctl00_btnsearch')]);
   await page.waitForTimeout(400);
   if (await page.$('text=/no results matching/i')) return { ok: false, reason: `no results for "${q}"` };
-  // open the matching result — prefer one whose text includes the colour, else the first
-  const results = await page.$$('a[href*="createorder"], [id*="rpStyle"] a, .style a');
-  let target = null;
-  for (const a of results) { const txt = ((await a.textContent()) || '').toLowerCase(); if (line.colour && txt.includes(String(line.colour).split('/')[0].toLowerCase())) { target = a; break; } }
-  if (!target && results.length) target = results[0];
-  if (!target) { // some results are image tiles with an onclick postback
-    const tile = await page.$(`text=/${q}/i`);
-    if (tile) target = tile;
+  // Results link to styleinfo.aspx?styleid=<STYLE NAME>. Pick the one whose styleid best
+  // matches our resolved item (disambiguates e.g. APKHT trouser vs APKHT short).
+  const links = await page.$$('a[href*="styleinfo"]');
+  if (!links.length) return { ok: false, reason: `no styleinfo results for "${q}"` };
+  const want = String(line.search || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  let target = links[0], best = -1;
+  for (const a of links) {
+    const href = ((await a.getAttribute('href')) || '').toLowerCase();
+    const sid = (href.split('styleid=')[1] || '').replace(/[^a-z0-9]/g, '');
+    let score = 0; if (sid === want) score = 100; else if (sid.includes(want) || want.includes(sid)) score = sid.length;
+    if (score > best) { best = score; target = a; }
   }
-  if (!target) return { ok: false, reason: `result not clickable for "${q}"` };
   await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), target.click()]);
-  await page.waitForTimeout(400);
-  // size grid: find the size column, then the qty box in the matching colour block
-  const set = await page.evaluate(({ size, colour, qty }) => {
-    const norm = (s) => String(s).toLowerCase().replace(/\s+/g, '');
-    // header sizes: the row of size labels above the qty boxes
-    const qboxes = [...document.querySelectorAll('input[id*="txtqty"]')];
-    if (!qboxes.length) return { ok: false, reason: 'no size grid' };
-    // build size -> index from the nearest header row cells
-    const tbl = qboxes[0].closest('table');
-    const headerCells = tbl ? [...tbl.querySelectorAll('th, td')].map((c) => c.innerText.trim()).filter(Boolean) : [];
-    const wantS = norm(size).replace(/uk$/,'');
-    // match a qty box whose column header equals our size
-    let idx = headerCells.findIndex((h) => norm(h) === wantS);
-    if (idx < 0) idx = headerCells.findIndex((h) => norm(h).includes(wantS) || wantS.includes(norm(h)));
-    // map header index to the qty box of the same visual column (best-effort: same index)
-    const box = qboxes[idx] || null;
-    if (!box) return { ok: false, reason: `size ${size} not found`,
-      diag: { qbox: qboxes.length, headers: headerCells.slice(0, 24),
-        firstBoxId: qboxes[0] && qboxes[0].id,
-        gridText: (tbl ? tbl.innerText : '').replace(/\s+/g, ' ').slice(0, 400),
-        nearLabels: [...document.querySelectorAll('th,td,label,span')].map((c) => c.innerText.trim()).filter((t) => /^(xxs|xs|s|m|l|xl|xxl|xxxl|\d{1,2}(\.5)?)$/i.test(t)).slice(0, 24) } };
-    box.value = String(qty);
-    box.dispatchEvent(new Event('change', { bubbles: true }));
-    return { ok: true, boxId: box.id };
-  }, { size: line.size, colour: line.colour, qty: line.qty });
+  await page.waitForTimeout(500);
+  // Size grid layout is "size / price / qty box" stacked per column. So for each qty box,
+  // the size is the leaf label horizontally centred on it and directly above it. Match by
+  // geometry (robust vs index — skips stray "0" cart badges; column-accurate for multi-colour).
+  const set = await page.evaluate(({ size, qty }) => {
+    const norm = (s) => String(s).toLowerCase().replace(/\s+/g, '').replace(/uk$/, '').replace(/^0+(?=\d)/, '');
+    const sizeRe = /^(XXS|XS|S|M|L|XL|XXL|3XL|XXXL|4XL|[1-9]\d?(\.5)?)$/i;   // note: excludes "0"
+    const boxes = [...document.querySelectorAll('input[id*="txtqty"]')];
+    if (!boxes.length) return { ok: false, reason: 'no size grid' };
+    const labels = [...document.querySelectorAll('div,span,td,th,b,strong,p')].filter((e) => e.children.length === 0 && sizeRe.test((e.innerText || '').trim()));
+    const want = norm(size);
+    for (const box of boxes) {
+      const br = box.getBoundingClientRect();
+      let lbl = null, bestDy = 1e9;
+      for (const e of labels) { const er = e.getBoundingClientRect(); const dx = Math.abs((er.left + er.right) / 2 - (br.left + br.right) / 2); const dy = br.top - er.top; if (dx < 25 && dy > 0 && dy < bestDy) { bestDy = dy; lbl = e; } }
+      if (lbl && norm(lbl.innerText.trim()) === want) { box.value = String(qty); box.dispatchEvent(new Event('change', { bubbles: true })); return { ok: true, boxId: box.id, matchedSize: lbl.innerText.trim() }; }
+    }
+    return { ok: false, reason: `size ${size} not found`, diag: { boxCount: boxes.length, labels: labels.map((e) => e.innerText.trim()).slice(0, 24) } };
+  }, { size: line.size, qty: line.qty });
   if (!set.ok) return set;
   // Submit adds the style to the basket
   await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), page.click('#ctl00_ContentPlaceHolder1_SubmitOrder')]);
