@@ -87,7 +87,11 @@ async function addLine(page, line) {
     if (idx < 0) idx = headerCells.findIndex((h) => norm(h).includes(wantS) || wantS.includes(norm(h)));
     // map header index to the qty box of the same visual column (best-effort: same index)
     const box = qboxes[idx] || null;
-    if (!box) return { ok: false, reason: `size ${size} not found (headers: ${headerCells.slice(0, 20).join(',')})` };
+    if (!box) return { ok: false, reason: `size ${size} not found`,
+      diag: { qbox: qboxes.length, headers: headerCells.slice(0, 24),
+        firstBoxId: qboxes[0] && qboxes[0].id,
+        gridText: (tbl ? tbl.innerText : '').replace(/\s+/g, ' ').slice(0, 400),
+        nearLabels: [...document.querySelectorAll('th,td,label,span')].map((c) => c.innerText.trim()).filter((t) => /^(xxs|xs|s|m|l|xl|xxl|xxxl|\d{1,2}(\.5)?)$/i.test(t)).slice(0, 24) } };
     box.value = String(qty);
     box.dispatchEvent(new Event('change', { bubbles: true }));
     return { ok: true, boxId: box.id };
