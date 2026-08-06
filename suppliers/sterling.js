@@ -93,10 +93,10 @@ async function addLine(page, line) {
     return { ok: false, reason: `size ${size} not found`, diag: { boxCount: boxes.length, labels: labels.map((e) => e.innerText.trim()).slice(0, 24) } };
   }, { size: line.size, qty: line.qty });
   if (!set.ok) return set;
-  // Submit adds the style to the basket
-  await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), page.click('#ctl00_ContentPlaceHolder1_SubmitOrder')]);
-  await page.waitForTimeout(400);
-  return { ok: true, boxId: set.boxId };
+  // "Add to Order" (on styleinfo.aspx) puts the style in the basket
+  await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), page.click('#ctl00_ContentPlaceHolder1_cmdadd')]);
+  await page.waitForTimeout(500);
+  return { ok: true, boxId: set.boxId, matchedSize: set.matchedSize };
 }
 
 export async function stage(page, { lines }) {
