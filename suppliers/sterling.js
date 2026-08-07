@@ -211,6 +211,24 @@ export async function stage(page, { lines, creds, keepBasket }) {
   return { cartCount: cart, added, expected: lines.length, units, ready: added === lines.length && cart === units, cleared, results, screenshot };
 }
 
+// Diagnostic: after staging, try to REACH the accept-order screen (JS-click Checkout, which
+// works even when the master-page button is hidden on a product page) and dump what's there —
+// WITHOUT confirming. Lets us validate the checkout navigation before a real placement.
+export async function checkoutProbe(page) {
+  const dump = async (label) => ({ label, url: page.url(), title: await page.title().catch(() => ''),
+    btnbasket: await page.evaluate(() => { const e = document.getElementById('ctl00_btnbasket'); if (!e) return { exists: false }; const r = e.getBoundingClientRect(); const s = getComputedStyle(e); return { exists: true, display: s.display, visibility: s.visibility, w: Math.round(r.width), h: Math.round(r.height) }; }).catch(() => ({ err: true })),
+    confirm: await page.evaluate(() => { const e = document.getElementById('ctl00_ContentPlaceHolder1_btnconfirmorder'); if (!e) return { exists: false }; const r = e.getBoundingClientRect(); const s = getComputedStyle(e); return { exists: true, display: s.display, visibility: s.visibility, w: Math.round(r.width), h: Math.round(r.height) }; }).catch(() => ({ err: true })),
+    delAddr: await page.evaluate(() => { const e = document.querySelector('#ctl00_ContentPlaceHolder1_cboDelAdd, select[id*=cboDelAdd], select[name*=cboDelAdd]'); return e ? { exists: true, value: e.options?.[e.selectedIndex]?.text || e.value } : { exists: false }; }).catch(() => ({ err: true })),
+    cart: await cartCount(page) });
+  const before = await dump('after-stage');
+  // JS-click Checkout (visibility-proof postback)
+  await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), page.evaluate(() => { const b = document.getElementById('ctl00_btnbasket'); if (b) b.click(); }).catch(() => {})]);
+  await page.waitForTimeout(1500);
+  const after = await dump('after-checkout-click');
+  const screenshot = `data:image/png;base64,${(await page.screenshot()).toString('base64')}`;
+  return { before, after, screenshot };
+}
+
 export async function place(page) {
   // Checkout → Accept Order (delivery defaults to Invoice Address = correct) → place
   await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), page.click('#ctl00_btnbasket')]);
