@@ -229,10 +229,14 @@ export async function checkoutProbe(page) {
   const after = await dump('after-checkout-click');
   // Dump ALL clickable controls on the basket page so we can find the proceed→confirm path
   const controls = await page.evaluate(() => [...document.querySelectorAll('input[type=submit],input[type=button],button,a.btn,a[href*="rder"]')].map((e) => { const r = e.getBoundingClientRect(); return { id: e.id || '', name: e.name || '', tag: e.tagName, txt: (e.value || e.innerText || '').trim().slice(0, 30), href: (e.getAttribute && e.getAttribute('href')) || '', w: Math.round(r.width), h: Math.round(r.height) }; }).filter((c) => c.txt || c.id).slice(0, 40)).catch(() => []);
-  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
-  await page.waitForTimeout(500);
+  // One more step: Submit the basket → the accept-order/address screen (STOP before confirm)
+  await page.evaluate(() => { const b = document.getElementById('ctl00_ContentPlaceHolder1_SubmitOrder'); if (b) b.click(); }).catch(() => {});
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
+  await page.waitForTimeout(2500);
+  const accept = await dump('after-submit');
+  const acceptControls = await page.evaluate(() => [...document.querySelectorAll('input[type=submit],input[type=button],button,select')].map((e) => { const r = e.getBoundingClientRect(); return { id: e.id || '', tag: e.tagName, txt: (e.value || e.innerText || '').trim().slice(0, 30), sel: e.tagName === 'SELECT' ? (e.options?.[e.selectedIndex]?.text || '') : '', w: Math.round(r.width), h: Math.round(r.height) }; }).filter((c) => c.txt || c.id || c.sel).slice(0, 40)).catch(() => []);
   const screenshot = `data:image/png;base64,${(await page.screenshot({ fullPage: true })).toString('base64')}`;
-  return { before, after, controls, screenshot };
+  return { before, after, controls, accept, acceptControls, screenshot };
 }
 
 export async function place(page) {
