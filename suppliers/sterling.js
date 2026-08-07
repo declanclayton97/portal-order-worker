@@ -229,11 +229,14 @@ export async function checkoutProbe(page) {
   const after = await dump('after-checkout-click');
   // Dump ALL clickable controls on the basket page so we can find the proceed→confirm path
   const controls = await page.evaluate(() => [...document.querySelectorAll('input[type=submit],input[type=button],button,a.btn,a[href*="rder"]')].map((e) => { const r = e.getBoundingClientRect(); return { id: e.id || '', name: e.name || '', tag: e.tagName, txt: (e.value || e.innerText || '').trim().slice(0, 30), href: (e.getAttribute && e.getAttribute('href')) || '', w: Math.round(r.width), h: Math.round(r.height) }; }).filter((c) => c.txt || c.id).slice(0, 40)).catch(() => []);
-  // One more step: Submit the basket → the accept-order/address screen (STOP before confirm)
+  // One more step: Submit the basket → the accept-order/address screen (STOP before confirm).
+  // Poll for the confirm button (same navigation-churn issue as place()) so this validates the
+  // real 40-unit timing without ever confirming.
   await page.evaluate(() => { const b = document.getElementById('ctl00_ContentPlaceHolder1_SubmitOrder'); if (b) b.click(); }).catch(() => {});
-  await page.waitForLoadState('domcontentloaded').catch(() => {});
-  await page.waitForTimeout(2500);
+  const confirmAppeared = await pollFor(page, '#ctl00_ContentPlaceHolder1_btnconfirmorder', { tries: 45, gap: 2000 });
+  await page.waitForTimeout(800);
   const accept = await dump('after-submit');
+  accept.confirmAppeared = confirmAppeared;
   const acceptControls = await page.evaluate(() => [...document.querySelectorAll('input[type=submit],input[type=button],button,select')].map((e) => { const r = e.getBoundingClientRect(); return { id: e.id || '', tag: e.tagName, txt: (e.value || e.innerText || '').trim().slice(0, 30), sel: e.tagName === 'SELECT' ? (e.options?.[e.selectedIndex]?.text || '') : '', w: Math.round(r.width), h: Math.round(r.height) }; }).filter((c) => c.txt || c.id || c.sel).slice(0, 40)).catch(() => []);
   // Text inputs on the accept screen (find the required "Your Ref" field + any empty required ones)
   const acceptInputs = await page.evaluate(() => [...document.querySelectorAll('input[type=text],textarea')].map((e) => { const r = e.getBoundingClientRect(); return { id: e.id || '', name: e.name || '', value: (e.value || '').slice(0, 30), w: Math.round(r.width), h: Math.round(r.height) }; }).filter((c) => c.w > 0).slice(0, 40)).catch(() => []);
@@ -256,20 +259,27 @@ export async function ordersList(page) {
   return { ordersUrl: page.url(), rows, screenshot };
 }
 
+// The shop transitions between basket and accept-order screens via postbacks that KEEP the
+// same createorder.aspx URL and pass through a JS "Loading…" interstitial — so Playwright's
+// waitForSelector couples to a never-settling navigation and times out. Poll with page.$
+// instead (tolerant of navigation churn); fixed sleeps between checks.
+async function pollFor(page, sel, { tries = 40, gap = 2000 } = {}) {
+  for (let i = 0; i < tries; i++) { await page.waitForTimeout(gap); const el = await page.$(sel).catch(() => null); if (el) return true; }
+  return false;
+}
+
 export async function place(page, { ref } = {}) {
   // any JS confirm() on the final button must be ACCEPTED (Playwright's default is dismiss = cancel)
   page.on('dialog', (d) => d.accept().catch(() => {}));
 
   // 1. Checkout — master-page button is present but zero-sized; JS-click posts back to the basket
   await page.evaluate(() => { const b = document.getElementById('ctl00_btnbasket'); if (b) b.click(); }).catch(() => {});
-  await page.waitForURL(/createorder\.aspx/i, { timeout: 40000 }).catch(() => {});
-  await page.waitForLoadState('domcontentloaded').catch(() => {});
-  await page.waitForSelector('#ctl00_ContentPlaceHolder1_SubmitOrder', { timeout: 30000 });
+  if (!(await pollFor(page, '#ctl00_ContentPlaceHolder1_SubmitOrder', { tries: 30, gap: 2000 }))) throw new Error('basket (createorder.aspx Submit) did not appear after Checkout');
+  await page.waitForTimeout(500);
 
-  // 2. Submit the basket (Confirm Order Quantity) → accept-order/address screen
+  // 2. Submit the basket (Confirm Order Quantity) → accept-order/address screen (same URL)
   await page.evaluate(() => { const b = document.getElementById('ctl00_ContentPlaceHolder1_SubmitOrder'); if (b) b.click(); }).catch(() => {});
-  await page.waitForLoadState('domcontentloaded').catch(() => {});
-  await page.waitForSelector('#ctl00_ContentPlaceHolder1_btnconfirmorder', { timeout: 40000 });
+  if (!(await pollFor(page, '#ctl00_ContentPlaceHolder1_btnconfirmorder', { tries: 45, gap: 2000 }))) throw new Error('accept-order screen (confirm button) did not appear within ~90s after Submit');
   await page.waitForTimeout(800);
 
   // 3. Fill the REQUIRED "Your Ref" (else validation blocks the order); PO number = traceability
@@ -280,17 +290,19 @@ export async function place(page, { ref } = {}) {
   const delAddr = await page.evaluate(() => { const e = document.getElementById('ctl00_ContentPlaceHolder1_cboDelAdd'); return e ? (e.options[e.selectedIndex]?.text || '') : ''; }).catch(() => '');
   const refSet = await page.inputValue('#ctl00_ContentPlaceHolder1_txtcustomerref').catch(() => '');
 
-  // 4. Confirm (final, irreversible)
+  // 4. Confirm (final, irreversible). Poll for the confirmation (button gone / thank-you text).
   await page.evaluate(() => { const b = document.getElementById('ctl00_ContentPlaceHolder1_btnconfirmorder'); if (b) b.click(); }).catch(() => {});
-  await page.waitForLoadState('domcontentloaded').catch(() => {});
-  await page.waitForTimeout(3500);
-
-  const text = await page.evaluate(() => document.body.innerText).catch(() => '');
-  const stillOnConfirm = !!(await page.$('#ctl00_ContentPlaceHolder1_btnconfirmorder'));
+  let done = false, text = '';
+  for (let i = 0; i < 30; i++) {
+    await page.waitForTimeout(2000);
+    const still = await page.$('#ctl00_ContentPlaceHolder1_btnconfirmorder').catch(() => 'err');
+    text = await page.evaluate(() => document.body.innerText).catch(() => '');
+    if (still === null || /thank|confirm(ed|ation)|success|received|has been (placed|submitted)|order (number|placed|received)/i.test(text)) { done = true; break; }
+  }
+  const stillOnConfirm = !!(await page.$('#ctl00_ContentPlaceHolder1_btnconfirmorder').catch(() => null));
   const orderNo = (text.match(/order\s*(?:no|number|ref|confirmation)[^0-9]{0,15}(\d{3,})/i)
     || text.match(/\b(?:order|confirmation)\D{0,6}(\d{5,})/i) || [])[1] || null;
-  // Placed if the confirmation wording shows OR we left the accept screen (confirm button gone).
-  const placed = /thank|confirm(ed|ation)|success|received|has been (placed|submitted)|order (number|placed|received)/i.test(text) || !stillOnConfirm;
+  const placed = done || !stillOnConfirm;
   const screenshot = `data:image/png;base64,${(await page.screenshot({ fullPage: true }).catch(() => Buffer.from(''))).toString('base64')}`;
   return { placed, orderNo, url: page.url(), delAddr, refSet, stillOnConfirm, confirmText: text.replace(/\s+/g, ' ').trim().slice(0, 500), screenshot };
 }
