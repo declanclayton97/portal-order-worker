@@ -162,9 +162,16 @@ export async function inspect(page, { lines, creds }) {
       if (target) { await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), target.click()]); await page.waitForTimeout(500); }
       const grid = await page.evaluate(() => {
         const r = (e) => { const b = e.getBoundingClientRect(); return { x: Math.round(b.left), y: Math.round(b.top), w: Math.round(b.width) }; };
-        const boxes = [...document.querySelectorAll('input[id*="txtqty"]')].map((e) => ({ id: e.id, ...r(e) }));
-        const labels = [...document.querySelectorAll('div,span,td,th,b,strong,p,label')].filter((e) => e.children.length === 0 && (e.innerText || '').trim() && (e.innerText || '').trim().length <= 12).map((e) => ({ t: e.innerText.trim(), ...r(e) }));
-        return { boxes, labels: labels.slice(0, 120), title: (document.querySelector('h1,h2,.styletitle')?.innerText || '').trim() };
+        // For each qty box: its id, geometry, and the text of ancestors up to 5 levels —
+        // the leg label (e.g. Regular/31") lives on the row, not as a leaf near the box.
+        const boxes = [...document.querySelectorAll('input[id*="txtqty"]')].map((e) => {
+          const anc = []; let p = e.parentElement; for (let i = 0; i < 6 && p; i++) { const own = [...p.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent.trim()).filter(Boolean).join(' '); anc.push({ tag: p.tagName, id: p.id || '', txt: (p.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 60), own: own.slice(0, 40) }); p = p.parentElement; }
+        return { id: e.id, ...r(e), anc };
+        });
+        // The whole style block's raw text (rows in order) + any row-lead cells
+        const block = document.querySelector('[id*="rpColour"]') || document.querySelector('table');
+        const rowLeads = [...document.querySelectorAll('tr')].map((tr) => (tr.querySelector('td,th')?.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 30);
+        return { boxes, title: (document.querySelector('h1,h2,.styletitle')?.innerText || '').trim(), blockText: (block?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 600), rowLeads };
       });
       out.push({ search: q, size: line.size, styleids, styleUrl: page.url(), ...grid });
     } catch (e) { out.push({ search: q, size: line.size, error: e.message }); }
