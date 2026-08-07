@@ -72,6 +72,8 @@ async function clearBasket(page) {
 // Add ONE line to the basket. Returns { ok, reason }.
 async function addLine(page, line, creds) {
   const q = searchTerm(line.search, line.colour);
+  const wantQty = Number(line.qty) || 1;
+  const cartBefore = await cartCount(page);
   // Recover the session/page if it dropped: without the search box (e.g. bounced to
   // login after many ops), go back to Styles and re-login. Prevents one bad line from
   // cascading fill-timeouts through the rest of the order.
@@ -111,7 +113,8 @@ async function addLine(page, line, creds) {
     const boxes = [...document.querySelectorAll('input[id*="txtqty"]')];
     if (!boxes.length) return { ok: false, reason: 'no size grid' };
     // "One size" products have a single box (no real size column) — just use it.
-    if (/one\s*size/i.test(size) && boxes.length === 1) { boxes[0].value = String(qty); boxes[0].dispatchEvent(new Event('change', { bubbles: true })); return { ok: true, boxId: boxes[0].id, matchedSize: 'One size' }; }
+    const setQty = (box, qty) => { box.value = String(qty); box.dispatchEvent(new Event('input', { bubbles: true })); box.dispatchEvent(new Event('change', { bubbles: true })); };
+    if (/one\s*size/i.test(size) && boxes.length === 1) { setQty(boxes[0], qty); return { ok: true, boxId: boxes[0].id, matchedSize: 'One size' }; }
     const labels = [...document.querySelectorAll('div,span,td,th,b,strong,p')].filter((e) => e.children.length === 0 && sizeRe.test((e.innerText || '').trim()));
     // Trouser sizes come through as "W32" / "L31W34" but the grid columns are the waist
     // number (30,32,34…). Use the waist number when present; else the normalised size.
@@ -121,7 +124,7 @@ async function addLine(page, line, creds) {
       const br = box.getBoundingClientRect();
       let lbl = null, bestDy = 1e9;
       for (const e of labels) { const er = e.getBoundingClientRect(); const dx = Math.abs((er.left + er.right) / 2 - (br.left + br.right) / 2); const dy = br.top - er.top; if (dx < 25 && dy > 0 && dy < bestDy) { bestDy = dy; lbl = e; } }
-      if (lbl && norm(lbl.innerText.trim()) === want) { box.value = String(qty); box.dispatchEvent(new Event('change', { bubbles: true })); return { ok: true, boxId: box.id, matchedSize: lbl.innerText.trim() }; }
+      if (lbl && norm(lbl.innerText.trim()) === want) { setQty(box, qty); return { ok: true, boxId: box.id, matchedSize: lbl.innerText.trim() }; }
     }
     return { ok: false, reason: `size ${size} not found`, diag: { boxCount: boxes.length, labels: labels.map((e) => e.innerText.trim()).slice(0, 24) } };
   }, { size: line.size, qty: line.qty });
@@ -129,6 +132,12 @@ async function addLine(page, line, creds) {
   // "Add to Order" (on styleinfo.aspx) puts the style in the basket
   await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), page.click('#ctl00_ContentPlaceHolder1_cmdadd')]);
   await page.waitForTimeout(500);
+  // Verify the basket actually grew by the full requested qty. A qty box that silently
+  // capped (stock limit / validation) leaves the line looking "added" but short — catch it
+  // here so a partial line fails the line (added<lines) and the order won't place.
+  const cartAfter = await cartCount(page);
+  const delta = cartAfter - cartBefore;
+  if (delta !== wantQty) return { ok: false, reason: `qty short: basket +${delta}, wanted ${wantQty}`, boxId: set.boxId, matchedSize: set.matchedSize, cartBefore, cartAfter };
   return { ok: true, boxId: set.boxId, matchedSize: set.matchedSize };
 }
 
