@@ -207,8 +207,9 @@ export async function stage(page, { lines, creds, keepBasket }) {
   const added = results.filter((r) => r.ok).length;
   const cart = await cartCount(page);
   const units = lines.reduce((a, l) => a + (Number(l.qty) || 1), 0);   // basket counts units, not lines
-  const screenshot = `data:image/png;base64,${(await page.screenshot()).toString('base64')}`;
-  return { cartCount: cart, added, expected: lines.length, units, ready: added === lines.length && cart === units, cleared, results, screenshot };
+  const ready = added === lines.length && cart === units;
+  const screenshot = ready ? null : `data:image/png;base64,${(await page.screenshot()).toString('base64')}`; // only on a problem
+  return { cartCount: cart, added, expected: lines.length, units, ready, cleared, results, screenshot };
 }
 
 // Diagnostic: after staging, try to REACH the accept-order screen (JS-click Checkout, which
@@ -255,7 +256,8 @@ export async function ordersList(page) {
   await page.goto(`${config.base}/Orders.aspx`, { waitUntil: 'domcontentloaded' }).catch(() => {});
   await page.waitForTimeout(2000);
   const rows = await page.evaluate(() => [...document.querySelectorAll('tr')].map((tr) => tr.innerText.replace(/\s+/g, ' ').trim()).filter((t) => t && t.length < 200).slice(0, 40)).catch(() => []);
-  const screenshot = `data:image/png;base64,${(await page.screenshot({ fullPage: true }).catch(() => Buffer.from(''))).toString('base64')}`;
+  // order-number pulls only need rows; only grab a screenshot when the list came back empty (debug)
+  const screenshot = rows.length ? null : `data:image/png;base64,${(await page.screenshot({ fullPage: true }).catch(() => Buffer.from(''))).toString('base64')}`;
   return { ordersUrl: page.url(), rows, screenshot };
 }
 
@@ -309,6 +311,8 @@ export async function place(page, { ref } = {}) {
     || (text.match(/\b(?:order|confirmation)\D{0,6}(\d{5,})/i) || [])[1]
     || null;
   const placed = done || !stillOnConfirm;
-  const screenshot = `data:image/png;base64,${(await page.screenshot({ fullPage: true }).catch(() => Buffer.from(''))).toString('base64')}`;
+  // Only capture the (large, full-page) screenshot when something went wrong — on a clean
+  // placement it's pure wasted bandwidth back through the poll.
+  const screenshot = placed ? null : `data:image/png;base64,${(await page.screenshot({ fullPage: true }).catch(() => Buffer.from(''))).toString('base64')}`;
   return { placed, orderNo, url: page.url(), delAddr, refSet, stillOnConfirm, confirmText: text.replace(/\s+/g, ' ').trim().slice(0, 500), screenshot };
 }
