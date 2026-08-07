@@ -221,12 +221,18 @@ export async function checkoutProbe(page) {
     delAddr: await page.evaluate(() => { const e = document.querySelector('#ctl00_ContentPlaceHolder1_cboDelAdd, select[id*=cboDelAdd], select[name*=cboDelAdd]'); return e ? { exists: true, value: e.options?.[e.selectedIndex]?.text || e.value } : { exists: false }; }).catch(() => ({ err: true })),
     cart: await cartCount(page) });
   const before = await dump('after-stage');
-  // JS-click Checkout (visibility-proof postback)
-  await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), page.evaluate(() => { const b = document.getElementById('ctl00_btnbasket'); if (b) b.click(); }).catch(() => {})]);
-  await page.waitForTimeout(1500);
+  // JS-click Checkout (visibility-proof postback) → redirects to createorder.aspx (basket)
+  await page.evaluate(() => { const b = document.getElementById('ctl00_btnbasket'); if (b) b.click(); }).catch(() => {});
+  await page.waitForURL(/createorder\.aspx/i, { timeout: 30000 }).catch(() => {});
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
+  await page.waitForTimeout(2500);
   const after = await dump('after-checkout-click');
-  const screenshot = `data:image/png;base64,${(await page.screenshot()).toString('base64')}`;
-  return { before, after, screenshot };
+  // Dump ALL clickable controls on the basket page so we can find the proceed→confirm path
+  const controls = await page.evaluate(() => [...document.querySelectorAll('input[type=submit],input[type=button],button,a.btn,a[href*="rder"]')].map((e) => { const r = e.getBoundingClientRect(); return { id: e.id || '', name: e.name || '', tag: e.tagName, txt: (e.value || e.innerText || '').trim().slice(0, 30), href: (e.getAttribute && e.getAttribute('href')) || '', w: Math.round(r.width), h: Math.round(r.height) }; }).filter((c) => c.txt || c.id).slice(0, 40)).catch(() => []);
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
+  await page.waitForTimeout(500);
+  const screenshot = `data:image/png;base64,${(await page.screenshot({ fullPage: true })).toString('base64')}`;
+  return { before, after, controls, screenshot };
 }
 
 export async function place(page) {
