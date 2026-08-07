@@ -300,8 +300,14 @@ export async function place(page, { ref } = {}) {
     if (still === null || /thank|confirm(ed|ation)|success|received|has been (placed|submitted)|order (number|placed|received)/i.test(text)) { done = true; break; }
   }
   const stillOnConfirm = !!(await page.$('#ctl00_ContentPlaceHolder1_btnconfirmorder').catch(() => null));
-  const orderNo = (text.match(/order\s*(?:no|number|ref|confirmation)[^0-9]{0,15}(\d{3,})/i)
-    || text.match(/\b(?:order|confirmation)\D{0,6}(\d{5,})/i) || [])[1] || null;
+  // Confirmation redirects to orders.aspx listing the placed order as
+  // "Select <OrderID> <style> … <ourRef> <date>". Read the OrderID from the row carrying OUR
+  // ref (the Your-Ref = PO number we set) — deterministic, vs guessing. Fallbacks after.
+  const escRef = String(ref || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const orderNo = (escRef && (text.match(new RegExp(`Select\\s+(\\d{5,})(?:(?!Select)[\\s\\S])*?\\b${escRef}\\b`)) || [])[1])
+    || (text.match(/order\s*(?:no|number|ref|confirmation)[^0-9]{0,15}(\d{3,})/i) || [])[1]
+    || (text.match(/\b(?:order|confirmation)\D{0,6}(\d{5,})/i) || [])[1]
+    || null;
   const placed = done || !stillOnConfirm;
   const screenshot = `data:image/png;base64,${(await page.screenshot({ fullPage: true }).catch(() => Buffer.from(''))).toString('base64')}`;
   return { placed, orderNo, url: page.url(), delAddr, refSet, stillOnConfirm, confirmText: text.replace(/\s+/g, ' ').trim().slice(0, 500), screenshot };
