@@ -141,6 +141,37 @@ async function addLine(page, line, creds) {
   return { ok: true, boxId: set.boxId, matchedSize: set.matchedSize };
 }
 
+// Diagnostic: for each line, search + open the best result, then dump the size grid's
+// boxes (id + geometry) and every candidate leaf label (text + geometry) WITHOUT adding.
+// Lets us see how a leg×waist trouser grid is laid out so the matcher can target leg+waist.
+export async function inspect(page, { lines, creds }) {
+  const out = [];
+  for (const line of lines) {
+    const q = searchTerm(line.search, line.colour);
+    try {
+      if (!(await page.$('#ctl00_txtsearch'))) { await page.goto(`${config.base}/styles.aspx?f=0`, { waitUntil: 'domcontentloaded' }).catch(() => {}); if (creds) { try { await login(page, creds); } catch {} } }
+      await page.fill('#ctl00_txtsearch', q);
+      await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), page.click('#ctl00_btnsearch')]);
+      await page.waitForTimeout(400);
+      const styleids = [];
+      for (const a of await page.$$('a[href*="styleinfo"]')) { if (await a.isVisible().catch(() => false)) { const h = (await a.getAttribute('href')) || ''; const sid = h.split('styleid=')[1] || ''; if (sid && !styleids.includes(sid)) styleids.push(sid); } }
+      const want = String(line.search || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const links = []; for (const a of await page.$$('a[href*="styleinfo"]')) if (await a.isVisible().catch(() => false)) links.push(a);
+      let target = links[0], best = -1;
+      for (const a of links) { const href = ((await a.getAttribute('href')) || '').toLowerCase(); const sid = (href.split('styleid=')[1] || '').replace(/[^a-z0-9]/g, ''); let sc = 0; if (sid === want) sc = 100; else if (sid.includes(want) || want.includes(sid)) sc = sid.length; if (sc > best) { best = sc; target = a; } }
+      if (target) { await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), target.click()]); await page.waitForTimeout(500); }
+      const grid = await page.evaluate(() => {
+        const r = (e) => { const b = e.getBoundingClientRect(); return { x: Math.round(b.left), y: Math.round(b.top), w: Math.round(b.width) }; };
+        const boxes = [...document.querySelectorAll('input[id*="txtqty"]')].map((e) => ({ id: e.id, ...r(e) }));
+        const labels = [...document.querySelectorAll('div,span,td,th,b,strong,p,label')].filter((e) => e.children.length === 0 && (e.innerText || '').trim() && (e.innerText || '').trim().length <= 12).map((e) => ({ t: e.innerText.trim(), ...r(e) }));
+        return { boxes, labels: labels.slice(0, 120), title: (document.querySelector('h1,h2,.styletitle')?.innerText || '').trim() };
+      });
+      out.push({ search: q, size: line.size, styleids, styleUrl: page.url(), ...grid });
+    } catch (e) { out.push({ search: q, size: line.size, error: e.message }); }
+  }
+  return { inspect: out };
+}
+
 export async function stage(page, { lines, creds, keepBasket }) {
   const cleared = keepBasket ? null : await clearBasket(page);
   const results = [];
