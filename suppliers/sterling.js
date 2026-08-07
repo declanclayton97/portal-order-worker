@@ -107,7 +107,7 @@ async function addLine(page, line, creds) {
   // Size grid layout is "size / price / qty box" stacked per column. So for each qty box,
   // the size is the leaf label horizontally centred on it and directly above it. Match by
   // geometry (robust vs index — skips stray "0" cart badges; column-accurate for multi-colour).
-  const set = await page.evaluate(({ size, qty }) => {
+  const set = await page.evaluate(({ size, qty, legIndex, legCount, waist }) => {
     const norm = (s) => String(s).toLowerCase().replace(/\s+/g, '').replace(/uk$/, '').replace(/^0+(?=\d)/, '');
     const sizeRe = /^(XXS|XS|S|M|L|XL|XXL|3XL|XXXL|4XL|[1-9]\d?(\.5)?)$/i;   // note: excludes "0"
     const boxes = [...document.querySelectorAll('input[id*="txtqty"]')];
@@ -115,6 +115,24 @@ async function addLine(page, line, creds) {
     // "One size" products have a single box (no real size column) — just use it.
     const setQty = (box, qty) => { box.value = String(qty); box.dispatchEvent(new Event('input', { bubbles: true })); box.dispatchEvent(new Event('change', { bubbles: true })); };
     if (/one\s*size/i.test(size) && boxes.length === 1) { setQty(boxes[0], qty); return { ok: true, boxId: boxes[0].id, matchedSize: 'One size' }; }
+    // Leg×waist trouser grid: one ROW per leg (ascending, but UNLABELLED — target by the
+    // leg's ordinal), one labelled COLUMN per waist. Rows can't be matched by text, so we
+    // guard that the grid's row count equals the style's leg count and refuse to guess if not.
+    if (legIndex != null && legCount) {
+      const top = (b) => Math.round(b.getBoundingClientRect().top);
+      const ys = [...new Set(boxes.map(top))].sort((a, b) => a - b);
+      if (ys.length !== legCount) return { ok: false, reason: `leg-grid rows ${ys.length} != expected legs ${legCount} (won't guess leg)`, diag: { ys, boxCount: boxes.length } };
+      const rowBoxes = boxes.filter((b) => top(b) === ys[legIndex]).sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+      const minY = Math.min(...boxes.map((b) => b.getBoundingClientRect().top));
+      const heads = [...document.querySelectorAll('div,span,td,th,b,strong,p,label')].filter((e) => e.children.length === 0 && /^\d{2}$/.test((e.innerText || '').trim()) && e.getBoundingClientRect().top < minY);
+      let target = null;
+      const wh = heads.find((h) => h.innerText.trim() === String(waist));
+      if (wh) { const hx = (wh.getBoundingClientRect().left + wh.getBoundingClientRect().right) / 2; let bd = 1e9; for (const b of rowBoxes) { const r = b.getBoundingClientRect(); const dx = Math.abs((r.left + r.right) / 2 - hx); if (dx < bd) { bd = dx; target = b; } } if (bd > 30) target = null; }
+      if (!target) { const ws = [...new Set(heads.map((h) => Number(h.innerText.trim())))].sort((a, b) => a - b); const ci = ws.indexOf(Number(waist)); if (ci >= 0 && ci < rowBoxes.length) target = rowBoxes[ci]; }
+      if (!target) return { ok: false, reason: `waist ${waist} column not found in leg grid`, diag: { cols: rowBoxes.length, heads: heads.map((h) => h.innerText.trim()) } };
+      setQty(target, qty);
+      return { ok: true, boxId: target.id, matchedSize: `leg[${legIndex}/${legCount}] W${waist}` };
+    }
     const labels = [...document.querySelectorAll('div,span,td,th,b,strong,p')].filter((e) => e.children.length === 0 && sizeRe.test((e.innerText || '').trim()));
     // Trouser sizes come through as "W32" / "L31W34" but the grid columns are the waist
     // number (30,32,34…). Use the waist number when present; else the normalised size.
@@ -127,7 +145,7 @@ async function addLine(page, line, creds) {
       if (lbl && norm(lbl.innerText.trim()) === want) { setQty(box, qty); return { ok: true, boxId: box.id, matchedSize: lbl.innerText.trim() }; }
     }
     return { ok: false, reason: `size ${size} not found`, diag: { boxCount: boxes.length, labels: labels.map((e) => e.innerText.trim()).slice(0, 24) } };
-  }, { size: line.size, qty: line.qty });
+  }, { size: line.size, qty: line.qty, legIndex: line.legIndex ?? null, legCount: line.legCount ?? null, waist: line.waist ?? null });
   if (!set.ok) return set;
   // "Add to Order" (on styleinfo.aspx) puts the style in the basket
   await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), page.click('#ctl00_ContentPlaceHolder1_cmdadd')]);
