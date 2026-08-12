@@ -57,6 +57,24 @@ export function ukMobile(raw) {
 
 const orderUrl = (orderId) => `${config.base}/patt-op.php?scode=invoice&oID=${encodeURIComponent(orderId)}`;
 
+/**
+ * The phone fields live on the "Addresses" jQuery-UI tab, which starts collapsed
+ * (div#invoice-addresses carries ui-tabs-hide, display:none). The inputs are in the DOM
+ * the whole time — which is why reading them works without this — but Playwright rightly
+ * refuses to type into a hidden field, so the tab has to be opened first, exactly as a
+ * person would.
+ */
+async function openAddressesTab(page) {
+  const tab = 'a[href="#invoice-addresses"]';
+  if (!(await page.$(tab))) {
+    const diag = await page.evaluate(() => ({ tabs: [...document.querySelectorAll('#invoice-tabs-wrapper a[href^="#"]')].map((a) => a.getAttribute('href')).slice(0, 10) }));
+    throw new Error(`Addresses tab not found — ${JSON.stringify(diag)}`);
+  }
+  await page.click(tab);
+  // wait for the panel to actually be shown rather than assuming the click landed
+  await page.waitForSelector('#delivery_mobile', { state: 'visible', timeout: 10000 });
+}
+
 export async function login(page, { user, pass }) {
   // The legacy form, not the Sage SPA. Landing on admin_login.php directly keeps us on the
   // old login; the SPA at "/" is a React app that this flow cannot drive.
@@ -124,6 +142,7 @@ export async function stage(page, { lines, parties }) {
     const diag = await page.evaluate(() => ({ url: location.href, title: document.title }));
     throw new Error(`order ${orderId} page did not load an editable order — ${JSON.stringify(diag)}`);
   }
+  await openAddressesTab(page);
 
   const before = await inspectCurrent(page);
   const filled = [];
