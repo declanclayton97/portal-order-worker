@@ -95,11 +95,25 @@ async function addLine(page, line, creds) {
   for (const a of allLinks) { if (await a.isVisible().catch(() => false)) links.push(a); }
   if (!links.length) return { ok: false, reason: `no visible styleinfo results for "${q}"` };
   const want = String(line.search || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  let target = links[0], best = -1;
+  // COLOUR IS DECISIVE. Each colour is a SEPARATE product after the search, and some styles'
+  // search names don't embed the colour (e.g. Stone "Lander" vs "Lander Black"; Black "Mercury"
+  // vs "Mercury Stone"). Matching on style name alone silently picks the wrong colour (multiple
+  // Lander Stone POs came in Black). So: strongly prefer a result that NAMES the target colour,
+  // and reject one that names a DIFFERENT colour.
+  const COLOURS = ['stone', 'black', 'brown', 'honey', 'grey', 'gray', 'navy', 'tan', 'sand', 'olive', 'wheat', 'chestnut', 'wine', 'bracken', 'khaki'];
+  const wantCols = String(line.colour || '').toLowerCase().split(/[\/,&]/).map((c) => c.replace(/[^a-z]/g, '')).filter(Boolean);
+  let target = links[0], best = -1e9;
   for (const a of links) {
     const href = ((await a.getAttribute('href')) || '').toLowerCase();
     const sid = (href.split('styleid=')[1] || '').replace(/[^a-z0-9]/g, '');
-    let score = 0; if (sid === want) score = 100; else if (sid.includes(want) || want.includes(sid)) score = sid.length;
+    const txt = String((await a.textContent().catch(() => '')) || '').toLowerCase();
+    const hay = sid + ' ' + txt.replace(/[^a-z0-9]/g, '');
+    let score = 0;
+    if (sid === want) score += 100; else if (sid.includes(want) || want.includes(sid)) score += Math.min(sid.length, 40);
+    if (wantCols.length) {
+      if (wantCols.some((c) => hay.includes(c))) score += 200;            // this result IS the target colour
+      else if (COLOURS.some((c) => !wantCols.includes(c) && hay.includes(c))) score -= 300; // names a DIFFERENT colour → reject
+    }
     if (score > best) { best = score; target = a; }
   }
   await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), target.click()]);
