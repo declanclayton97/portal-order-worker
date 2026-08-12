@@ -47,6 +47,33 @@ function searchTerm(search, colour) {
   return s || String(search || '').trim();
 }
 
+// Pick the search result matching BOTH style and COLOUR. Colour is decisive: each colour is a
+// SEPARATE product after the search, and some styles' search names omit the colour (Stone
+// "Lander" vs "Lander Black"), so a style-only match silently grabs the wrong colour. Strongly
+// prefer a result naming the target colour; reject one naming a different colour. Returns the
+// chosen link + a per-result score breakdown (for the diagnostic).
+const RESULT_COLOURS = ['stone', 'black', 'brown', 'honey', 'grey', 'gray', 'navy', 'tan', 'sand', 'olive', 'wheat', 'chestnut', 'wine', 'bracken', 'khaki'];
+async function pickResult(links, line) {
+  const want = String(line.search || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const wantCols = String(line.colour || '').toLowerCase().split(/[\/,&]/).map((c) => c.replace(/[^a-z]/g, '')).filter(Boolean);
+  let target = links[0], best = -1e9; const breakdown = [];
+  for (const a of links) {
+    const href = ((await a.getAttribute('href')) || '').toLowerCase();
+    const sid = (href.split('styleid=')[1] || '').replace(/[^a-z0-9]/g, '');
+    const txt = String((await a.textContent().catch(() => '')) || '').toLowerCase();
+    const hay = sid + ' ' + txt.replace(/[^a-z0-9]/g, '');
+    let score = 0;
+    if (sid === want) score += 100; else if (sid.includes(want) || want.includes(sid)) score += Math.min(sid.length, 40);
+    if (wantCols.length) {
+      if (wantCols.some((c) => hay.includes(c))) score += 200;                                   // this result IS the target colour
+      else if (RESULT_COLOURS.some((c) => !wantCols.includes(c) && hay.includes(c))) score -= 300; // a DIFFERENT colour → reject
+    }
+    breakdown.push({ sid, txt: txt.replace(/\s+/g, ' ').trim().slice(0, 50), score });
+    if (score > best) { best = score; target = a; }
+  }
+  return { target, breakdown };
+}
+
 async function cartCount(page) {
   const t = await page.textContent('#cart').catch(() => '');
   const m = String(t || '').match(/(\d+)/); return m ? Number(m[1]) : 0;
@@ -94,28 +121,7 @@ async function addLine(page, line, creds) {
   const links = [];
   for (const a of allLinks) { if (await a.isVisible().catch(() => false)) links.push(a); }
   if (!links.length) return { ok: false, reason: `no visible styleinfo results for "${q}"` };
-  const want = String(line.search || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  // COLOUR IS DECISIVE. Each colour is a SEPARATE product after the search, and some styles'
-  // search names don't embed the colour (e.g. Stone "Lander" vs "Lander Black"; Black "Mercury"
-  // vs "Mercury Stone"). Matching on style name alone silently picks the wrong colour (multiple
-  // Lander Stone POs came in Black). So: strongly prefer a result that NAMES the target colour,
-  // and reject one that names a DIFFERENT colour.
-  const COLOURS = ['stone', 'black', 'brown', 'honey', 'grey', 'gray', 'navy', 'tan', 'sand', 'olive', 'wheat', 'chestnut', 'wine', 'bracken', 'khaki'];
-  const wantCols = String(line.colour || '').toLowerCase().split(/[\/,&]/).map((c) => c.replace(/[^a-z]/g, '')).filter(Boolean);
-  let target = links[0], best = -1e9;
-  for (const a of links) {
-    const href = ((await a.getAttribute('href')) || '').toLowerCase();
-    const sid = (href.split('styleid=')[1] || '').replace(/[^a-z0-9]/g, '');
-    const txt = String((await a.textContent().catch(() => '')) || '').toLowerCase();
-    const hay = sid + ' ' + txt.replace(/[^a-z0-9]/g, '');
-    let score = 0;
-    if (sid === want) score += 100; else if (sid.includes(want) || want.includes(sid)) score += Math.min(sid.length, 40);
-    if (wantCols.length) {
-      if (wantCols.some((c) => hay.includes(c))) score += 200;            // this result IS the target colour
-      else if (COLOURS.some((c) => !wantCols.includes(c) && hay.includes(c))) score -= 300; // names a DIFFERENT colour → reject
-    }
-    if (score > best) { best = score; target = a; }
-  }
+  const { target } = await pickResult(links, line);
   await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), target.click()]);
   await page.waitForTimeout(500);
   // Size grid layout is "size / price / qty box" stacked per column. So for each qty box,
@@ -187,10 +193,8 @@ export async function inspect(page, { lines, creds }) {
       await page.waitForTimeout(400);
       const styleids = [];
       for (const a of await page.$$('a[href*="styleinfo"]')) { if (await a.isVisible().catch(() => false)) { const h = (await a.getAttribute('href')) || ''; const sid = h.split('styleid=')[1] || ''; if (sid && !styleids.includes(sid)) styleids.push(sid); } }
-      const want = String(line.search || '').toLowerCase().replace(/[^a-z0-9]/g, '');
       const links = []; for (const a of await page.$$('a[href*="styleinfo"]')) if (await a.isVisible().catch(() => false)) links.push(a);
-      let target = links[0], best = -1;
-      for (const a of links) { const href = ((await a.getAttribute('href')) || '').toLowerCase(); const sid = (href.split('styleid=')[1] || '').replace(/[^a-z0-9]/g, ''); let sc = 0; if (sid === want) sc = 100; else if (sid.includes(want) || want.includes(sid)) sc = sid.length; if (sc > best) { best = sc; target = a; } }
+      const { target, breakdown } = await pickResult(links, line);   // SAME colour-aware picker as addLine
       if (target) { await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), target.click()]); await page.waitForTimeout(500); }
       const grid = await page.evaluate(() => {
         const r = (e) => { const b = e.getBoundingClientRect(); return { x: Math.round(b.left), y: Math.round(b.top), w: Math.round(b.width) }; };
@@ -205,7 +209,7 @@ export async function inspect(page, { lines, creds }) {
         const rowLeads = [...document.querySelectorAll('tr')].map((tr) => (tr.querySelector('td,th')?.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 30);
         return { boxes, title: (document.querySelector('h1,h2,.styletitle')?.innerText || '').trim(), blockText: (block?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 600), rowLeads };
       });
-      out.push({ search: q, size: line.size, styleids, styleUrl: page.url(), ...grid });
+      out.push({ search: q, wantColour: line.colour, size: line.size, styleids, resultScores: breakdown, chosenStyleUrl: page.url(), ...grid });
     } catch (e) { out.push({ search: q, size: line.size, error: e.message }); }
   }
   return { inspect: out };
