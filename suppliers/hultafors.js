@@ -72,20 +72,23 @@ export async function login(page, { user, pass }) {
   await dismissConsent(page);           // banner covers the LOGIN button — must clear it first
   const userSel = 'input[name="User.UserName"]';
   const passSel = 'input[name="User.Password"]';
-  if (await page.$(passSel)) {
+  if (await page.$(passSel).catch(() => null)) {
     await page.fill(userSel, user).catch(() => {});
     await page.fill(passSel, pass).catch(() => {});
     await dismissConsent(page);          // re-clear in case it re-appeared after fill
     // Prefer the form's submit button; fall back to Enter in the password field.
-    const btn = await page.$('#loginform button[type=submit], #loginform input[type=submit], button:has-text("Log in"), input[type=submit][value*="Log" i]');
+    const btn = await page.$('#loginform button[type=submit], #loginform input[type=submit], button:has-text("Log in"), input[type=submit][value*="Log" i]').catch(() => null);
     await Promise.all([
       page.waitForLoadState('domcontentloaded').catch(() => {}),
       btn ? btn.click().catch(() => {}) : page.press(passSel, 'Enter').catch(() => {}),
     ]);
-    await page.waitForTimeout(1200);
+    // Wait out the post-login redirect BEFORE reading the page, else page.$ throws
+    // "Execution context was destroyed" mid-navigation.
+    await page.waitForLoadState('domcontentloaded').catch(() => {});
+    await page.waitForTimeout(2500);
   }
   // Logged in = the login form is gone (redirected to the portal home/dashboard).
-  if (await page.$('#loginform')) {
+  if (await page.$('#loginform').catch(() => null)) {
     const diag = await page.evaluate(() => ({
       url: location.href,
       err: /invalid|incorrect|not recognised|failed|try again|locked/i.test(document.body.innerText),
