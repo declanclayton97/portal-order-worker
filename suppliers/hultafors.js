@@ -198,22 +198,24 @@ export async function checkoutProbe(page) {
     label, url: page.url(), title: await page.title().catch(() => ''),
     buttons: await page.evaluate(() => [...document.querySelectorAll('button, input[type=submit], input[type=button], a.btn')].map((e) => { const r = e.getBoundingClientRect(); return { id: e.id || '', name: e.name || '', txt: (e.value || e.innerText || '').trim().slice(0, 30), w: Math.round(r.width), h: Math.round(r.height) }; }).filter((c) => (c.txt || c.id) && c.w > 0).slice(0, 40)).catch(() => []),
   });
-  const before = await dump('after-stage');
-  // Click "Proceed to payment" (text-based; the exact id isn't in the pre-payment HAR).
-  const proceed = await page.$('button:has-text("Proceed to payment"), a:has-text("Proceed to payment"), input[value*="Proceed" i], #btnProceedToPayment');
-  if (proceed) { await proceed.click().catch(() => {}); await page.waitForTimeout(3000); }
-  const after = await dump('after-proceed');
-  // Look specifically for the payment-step control ids from the checkout JS.
-  const paymentControls = await page.evaluate(() => ({
-    btnCheckout: !!document.querySelector('#btnCheckout'),
-    btnPlaceOrder: [...document.querySelectorAll('[id^="btnPlaceOrder_"]')].map((e) => e.id),
-    btnCheckPayment: [...document.querySelectorAll('[id^="btnCheckPayment_"]')].map((e) => e.id),
-    statusText: [...document.querySelectorAll('[id^="statusText_"]')].map((e) => e.id),
-    poValue: (document.querySelector('#poNumber') || {}).value || null,
+  const before = await dump('cart');
+  // `/en/Checkout` is the CART page; advancing = CHECKOUT (#btnCheckout, text "CHECKOUT").
+  // Click it once to reach the delivery/checkout page and map that — STOP there (no payment,
+  // no place). This is plain navigation, well before any order-creating call.
+  const co = await page.$('#btnCheckout');
+  if (co) { await co.click().catch(() => {}); await page.waitForTimeout(4000); await page.waitForLoadState('domcontentloaded').catch(() => {}); }
+  const after = await dump('after-checkout');
+  const checkoutControls = await page.evaluate(() => ({
+    url: location.href,
+    hasPoNumber: !!document.querySelector('#poNumber, input[name="BasketHead.CustomerPurchaseOrderNo"]'),
     paymentOptions: [...document.querySelectorAll('.paymentOption')].map((e) => e.getAttribute('data-code')),
+    proceedButtons: [...document.querySelectorAll('button, a, input[type=submit], input[type=button]')].map((e) => (e.innerText || e.value || '').trim()).filter((t) => /proceed|payment|continue|next|confirm|place order|submit/i.test(t)).slice(0, 12),
+    btnCheckoutPresent: !!document.querySelector('#btnCheckout'),
+    btnPlaceOrder: [...document.querySelectorAll('[id^="btnPlaceOrder_"]')].map((e) => e.id),
+    deliverySelects: [...document.querySelectorAll('select')].map((e) => ({ id: e.id || '', name: e.name || '' })).filter((s) => /addr|deliv|ship/i.test(s.id + s.name)).slice(0, 6),
   })).catch(() => ({}));
   const screenshot = `data:image/png;base64,${(await page.screenshot({ fullPage: true }).catch(() => Buffer.from(''))).toString('base64')}`;
-  return { before, after, paymentControls, screenshot };
+  return { before, after, checkoutControls, screenshot };
 }
 
 // GATED placement. Runs the full chain: proceed → CashOrCheckPayment (#btnCheckout) →
