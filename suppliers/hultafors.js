@@ -190,33 +190,21 @@ export async function stage(page, { lines, keepBasket, purchaseOrder, ref } = {}
   };
 }
 
-// The FINAL, irreversible button on the payment step. Never clicked outside place().
-const PAY_RE = /confirm and pay|place order|pay now|^pay$/i;
-const NEXT_RE = /continue to delivery|continue to payment|continue|next|proceed to/i;
+// The Hultafors checkout is a fixed accordion, each step advanced by a STABLE button id
+// (mapped live 2026-08-13):
+//   cart --#btnCheckout--> step1 (address; PO here) --#btnDelivery--> delivery
+//   --#btnPayment--> payment (invoice) --#btnSummary("NEXT")--> summary
+//   --#btnConfirm("Confirm")--> PLACED.  #btnConfirm is the only irreversible click.
+const WIZARD_ADVANCE = ['#btnDelivery', '#btnPayment', '#btnSummary'];
+const CONFIRM_SEL = '#btnConfirm';
 
-// Is the (visible) "Confirm and Pay" button on the page right now?
-async function atPaymentStep(page) {
-  return page.evaluate((paySrc) => {
-    const pay = new RegExp(paySrc, 'i');
-    return [...document.querySelectorAll('button, a, input[type=submit], input[type=button]')].some((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && pay.test((e.innerText || e.value || '').trim()); });
-  }, PAY_RE.source).catch(() => false);
-}
-
-// Click the visible forward/"continue" button (NEVER the pay button). Returns its text or null.
-async function clickForward(page) {
-  const info = await page.evaluate(({ nextSrc, paySrc }) => {
-    const next = new RegExp(nextSrc, 'i'), pay = new RegExp(paySrc, 'i');
-    const els = [...document.querySelectorAll('button, a, input[type=submit], input[type=button]')].filter((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
-    const el = els.find((e) => { const t = (e.innerText || e.value || '').trim(); return next.test(t) && !pay.test(t); });
-    if (!el) return null;
-    el.setAttribute('data-worker-fwd', '1');
-    return { txt: (el.innerText || el.value || '').trim().slice(0, 30) };
-  }, { nextSrc: NEXT_RE.source, paySrc: PAY_RE.source }).catch(() => null);
-  if (!info) return null;
-  await page.locator('[data-worker-fwd="1"]').first().click({ timeout: 5000 }).catch(async () => { await page.evaluate(() => document.querySelector('[data-worker-fwd="1"]')?.click()).catch(() => {}); });
-  await page.evaluate(() => document.querySelector('[data-worker-fwd="1"]')?.removeAttribute('data-worker-fwd')).catch(() => {});
-  await page.waitForTimeout(3500);
-  return info.txt;
+// Click a button by id if it's visible; JS-click fallback. Returns whether it clicked.
+async function clickId(page, sel, waitMs = 3500) {
+  const el = await page.$(sel);
+  if (!el || !(await el.isVisible().catch(() => false))) return false;
+  await el.click({ timeout: 6000 }).catch(async () => { await page.evaluate((s) => document.querySelector(s)?.click(), sel).catch(() => {}); });
+  await page.waitForTimeout(waitMs);
+  return true;
 }
 
 // A snapshot of the current wizard step: url + visible buttons + PO field + payment options.
@@ -230,69 +218,51 @@ async function snapStep(page, label) {
   return { label, ...s };
 }
 
-// Diagnostic: walk the checkout wizard (cart → CHECKOUT → Continue… steps) up to the
-// PAYMENT step and dump each step's controls — STOPPING before "Confirm and Pay". Sets the
-// PO number along the way. Never places. Mirrors Sterling's checkoutProbe.
-export async function checkoutProbe(page, { ref } = {}) {
-  const steps = [];
-  steps.push(await snapStep(page, 'cart'));
-  await page.locator('#btnCheckout').first().click().catch(() => {});
-  await page.waitForTimeout(4000);
-  await setPO(page, ref || 'PROBE-PO');
-  steps.push(await snapStep(page, 'checkout-step1'));
-  for (let i = 0; i < 4; i++) {
-    if (await atPaymentStep(page)) { steps.push(await snapStep(page, 'PAYMENT-STEP (stopped before pay)')); break; }
-    const clicked = await clickForward(page);
-    if (!clicked) { steps.push(await snapStep(page, 'stuck-no-forward-button')); break; }
+// Walk cart → summary: CHECKOUT, set PO, then click each advance button in turn (selecting
+// invoice along the way). STOPS at the summary step, before #btnConfirm. Returns the trail.
+async function walkToConfirm(page, ref) {
+  const trail = [];
+  trail.push((await clickId(page, '#btnCheckout')) ? 'checkout' : 'checkout(missing)');
+  const poRes = await setPO(page, ref);
+  for (const sel of WIZARD_ADVANCE) {
+    const ok = await clickId(page, sel);
+    trail.push(sel + (ok ? '' : '(missing)'));
     await selectInvoicePayment(page).catch(() => {});
-    steps.push(await snapStep(page, 'after:' + clicked));
   }
-  const screenshot = `data:image/png;base64,${(await page.screenshot({ fullPage: true }).catch(() => Buffer.from(''))).toString('base64')}`;
-  return { steps, reachedPayment: await atPaymentStep(page), screenshot };
+  const atConfirm = !!(await page.$(CONFIRM_SEL));
+  return { trail, poRes, atConfirm };
 }
 
-// GATED placement. Walks the wizard: cart → CHECKOUT → set PO → Continue-to-Delivery →
-// Continue-to-Payment → select invoice → click "Confirm and Pay". Only runs on execute:true;
-// fire exactly once (index.js never retries a submit).
+// Diagnostic: walk the wizard to the SUMMARY step and dump it — STOPPING before #btnConfirm.
+// Sets the PO along the way. Never places.
+export async function checkoutProbe(page, { ref } = {}) {
+  const cart = await snapStep(page, 'cart');
+  const w = await walkToConfirm(page, ref || 'PROBE-PO');
+  const summary = await snapStep(page, 'summary');
+  const screenshot = `data:image/png;base64,${(await page.screenshot({ fullPage: true }).catch(() => Buffer.from(''))).toString('base64')}`;
+  return { cart, trail: w.trail, poSet: w.poRes, atConfirm: w.atConfirm, summary, screenshot };
+}
+
+// GATED placement. Walks the wizard to the summary, then clicks #btnConfirm — the single
+// irreversible step. Only runs on execute:true; fire exactly once (index.js never retries).
 export async function place(page, { ref } = {}) {
   page.on('dialog', (d) => d.accept().catch(() => {}));
-  await page.locator('#btnCheckout').first().click().catch(() => {});   // cart → checkout wizard
-  await page.waitForTimeout(4000);
-  const poRes = await setPO(page, ref);
-  await selectInvoicePayment(page).catch(() => {});
-  // Advance through the continue-steps until the pay button is visible.
-  let reachedPay = false;
-  for (let i = 0; i < 5; i++) {
-    if (await atPaymentStep(page)) { reachedPay = true; break; }
-    const clicked = await clickForward(page);
-    await selectInvoicePayment(page).catch(() => {});
-    if (!clicked) break;
-  }
-  if (!reachedPay) {
+  const w = await walkToConfirm(page, ref);
+  if (!w.atConfirm) {
     const shot = `data:image/png;base64,${(await page.screenshot({ fullPage: true }).catch(() => Buffer.from(''))).toString('base64')}`;
-    return { placed: false, error: 'did not reach the payment step (Confirm and Pay not visible)', poSet: poRes.value || null, url: page.url(), screenshot: shot };
+    return { placed: false, error: 'did not reach the Confirm step', trail: w.trail, poSet: w.poRes.value || null, url: page.url(), screenshot: shot };
   }
-  // FINAL: click "Confirm and Pay".
-  const marked = await page.evaluate((paySrc) => {
-    const pay = new RegExp(paySrc, 'i');
-    const el = [...document.querySelectorAll('button, a, input[type=submit], input[type=button]')].find((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && pay.test((e.innerText || e.value || '').trim()); });
-    if (el) { el.setAttribute('data-worker-pay', '1'); return true; }
-    return false;
-  }, PAY_RE.source).catch(() => false);
-  if (!marked) throw new Error('Confirm-and-Pay button vanished before click');
-  await page.locator('[data-worker-pay="1"]').first().click({ timeout: 8000 }).catch(async () => { await page.evaluate(() => document.querySelector('[data-worker-pay="1"]')?.click()).catch(() => {}); });
-  // Verify: confirmation text/URL, or the older green-status / ForceOrder path.
+  // FINAL, irreversible: click Confirm.
+  await clickId(page, CONFIRM_SEL, 2500);
+  // Verify: order confirmation surfaced (text or URL), or the Confirm button is gone.
   let placed = false, statusText = '';
   for (let i = 0; i < 30; i++) {
     await page.waitForTimeout(2000);
-    const s = await page.evaluate(() => ({
-      text: document.body.innerText.slice(0, 4000), url: location.href,
-      green: [...document.querySelectorAll('[id^="statusText_"]')].some((e) => /rgb\(0,\s*128,\s*0\)|green/i.test(getComputedStyle(e).color)),
-    })).catch(() => ({}));
+    const s = await page.evaluate(() => ({ text: document.body.innerText.slice(0, 4000), url: location.href, confirmGone: !document.querySelector('#btnConfirm') })).catch(() => ({}));
     statusText = s.text || statusText;
-    if (s.green || /order\s*confirmation|thank you|your order (has been|is) (placed|received|confirmed)|order (number|complete|received)|orderconfirm|receipt/i.test(statusText) || /confirm(ation)?|receipt|thankyou|orderplaced/i.test(s.url || '')) { placed = true; break; }
+    if (/order\s*confirmation|thank you|your order (has been|is) (placed|received|confirmed)|order (number|complete|received|placed)|orderconfirm|receipt/i.test(statusText) || /confirmation|receipt|thankyou|orderplaced|ordercomplete/i.test(s.url || '')) { placed = true; break; }
   }
   const orderNo = (String(statusText).match(/order\s*(?:no|number|confirmation)[^0-9]{0,12}(\d{4,})/i) || [])[1] || null;
   const screenshot = placed ? null : `data:image/png;base64,${(await page.screenshot({ fullPage: true }).catch(() => Buffer.from(''))).toString('base64')}`;
-  return { placed, orderNo, url: page.url(), poSet: poRes.value || null, statusText: String(statusText).replace(/\s+/g, ' ').slice(0, 400), screenshot };
+  return { placed, orderNo, trail: w.trail, url: page.url(), poSet: w.poRes.value || null, statusText: String(statusText).replace(/\s+/g, ' ').slice(0, 400), screenshot };
 }
