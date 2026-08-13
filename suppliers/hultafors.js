@@ -33,15 +33,18 @@ async function pollFor(page, sel, { tries = 40, gap = 1500 } = {}) {
 // choice (Decline all / Reject); only fall back to Accept if there's no decline option.
 // Matched in-page by button TEXT so it's robust to the exact markup.
 async function dismissConsent(page) {
-  for (let attempt = 0; attempt < 4; attempt++) {
+  for (let attempt = 0; attempt < 5; attempt++) {
     const clicked = await page.evaluate(() => {
-      const els = [...document.querySelectorAll('button, a, input[type=button], input[type=submit]')].filter((e) => e.offsetParent !== null);
+      // NB: the consent modal is position:fixed, so offsetParent is null for its
+      // buttons — use a rect-based visibility check, not offsetParent.
+      const visible = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+      const els = [...document.querySelectorAll('button, a, input[type=button], input[type=submit]')].filter(visible);
       const byText = (re) => els.find((e) => re.test((e.innerText || e.value || '').trim()));
       const target = byText(/decline all|reject all|only necessary|decline$/i) || byText(/^decline/i) || byText(/^(accept all|allow all)$/i);
       if (target) { target.click(); return (target.innerText || target.value || '').trim().slice(0, 30); }
       return null;
     }).catch(() => null);
-    if (clicked) { await page.waitForTimeout(600); return clicked; }
+    if (clicked) { await page.waitForTimeout(700); return clicked; }
     await page.waitForTimeout(700);
   }
   return null;
