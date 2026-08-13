@@ -29,25 +29,41 @@ async function pollFor(page, sel, { tries = 40, gap = 1500 } = {}) {
 }
 
 // Dismiss the cookie/consent modal if one is covering the page (it eats clicks).
-// The banner can render a beat after load, so retry. Prefer the privacy-preserving
-// choice (Decline all / Reject); only fall back to Accept if there's no decline option.
-// Matched in-page by button TEXT so it's robust to the exact markup.
+// The widget is JS-injected and lives in an IFRAME on the login page, so a plain
+// page.evaluate(document.querySelectorAll) can't reach it — use Playwright locators,
+// which pierce iframes AND shadow DOM. Prefer the privacy-preserving choice (Decline
+// all / Reject); fall back to Accept only if there's no decline. Last resort: hide any
+// full-screen fixed overlay so the login button is clickable (grants no consent).
 async function dismissConsent(page) {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const clicked = await page.evaluate(() => {
-      // NB: the consent modal is position:fixed, so offsetParent is null for its
-      // buttons — use a rect-based visibility check, not offsetParent.
-      const visible = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
-      const els = [...document.querySelectorAll('button, a, input[type=button], input[type=submit]')].filter(visible);
-      const byText = (re) => els.find((e) => re.test((e.innerText || e.value || '').trim()));
-      const target = byText(/decline all|reject all|only necessary|decline$/i) || byText(/^decline/i) || byText(/^(accept all|allow all)$/i);
-      if (target) { target.click(); return (target.innerText || target.value || '').trim().slice(0, 30); }
-      return null;
-    }).catch(() => null);
-    if (clicked) { await page.waitForTimeout(700); return clicked; }
-    await page.waitForTimeout(700);
+  const names = [/decline all/i, /reject all/i, /only necessary/i, /^decline$/i, /accept all/i, /allow all/i];
+  for (let attempt = 0; attempt < 6; attempt++) {
+    for (const frame of page.frames()) {
+      for (const re of names) {
+        // role=button covers <button>; the locator fallback covers <a>/<input> styled as buttons.
+        const locs = [frame.getByRole('button', { name: re }), frame.locator('button, a, input[type=button], input[type=submit]').filter({ hasText: re })];
+        for (const loc of locs) {
+          const n = await loc.count().catch(() => 0);
+          for (let i = 0; i < n; i++) {
+            const b = loc.nth(i);
+            if (await b.isVisible().catch(() => false)) { await b.click({ timeout: 2500 }).catch(() => {}); await page.waitForTimeout(800); return re.source; }
+          }
+        }
+      }
+    }
+    await page.waitForTimeout(1000);
   }
-  return null;
+  // Fallback: remove any large fixed/absolute high-z overlay covering the page so clicks
+  // land on the login form. This hides the banner without accepting cookies.
+  await page.evaluate(() => {
+    for (const e of document.querySelectorAll('body *')) {
+      const s = getComputedStyle(e);
+      if ((s.position === 'fixed' || s.position === 'absolute') && Number(s.zIndex) >= 1000) {
+        const r = e.getBoundingClientRect();
+        if (r.width > window.innerWidth * 0.5 && r.height > window.innerHeight * 0.3) e.style.display = 'none';
+      }
+    }
+  }).catch(() => {});
+  return 'overlay-hidden-fallback';
 }
 
 export async function login(page, { user, pass }) {
