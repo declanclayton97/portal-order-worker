@@ -145,7 +145,7 @@ async function basketInfo(page) {
 async function setPO(page, ref) {
   if (!ref) return { poSet: false, reason: 'no ref' };
   const sel = '#poNumber, input[name="BasketHead.CustomerPurchaseOrderNo"]';
-  const el = await page.$(sel);
+  const el = await page.$(sel).catch(() => null);
   if (!el) return { poSet: false, reason: 'poNumber field not on page' };
   await el.fill(String(ref).slice(0, 50)).catch(async () => {
     await page.evaluate((v) => { const e = document.querySelector('#poNumber, input[name="BasketHead.CustomerPurchaseOrderNo"]'); if (e) { e.value = v; e.dispatchEvent(new Event('change', { bubbles: true })); e.dispatchEvent(new Event('blur', { bubbles: true })); } }, String(ref).slice(0, 50));
@@ -156,7 +156,7 @@ async function setPO(page, ref) {
 
 // Select the invoice/account payment option if the radio is present.
 async function selectInvoicePayment(page) {
-  const r = await page.$('.paymentOption[data-code="invoice"], input[name="paymentOption"][data-code="invoice"]');
+  const r = await page.$('.paymentOption[data-code="invoice"], input[name="paymentOption"][data-code="invoice"]').catch(() => null);
   if (!r) return { paymentSelected: false, reason: 'invoice option not found' };
   await r.check().catch(() => r.click().catch(() => {}));
   await page.waitForTimeout(500);
@@ -173,13 +173,22 @@ export async function stage(page, { lines, keepBasket, purchaseOrder, ref } = {}
   const importOk = /true/i.test(f.IsDone) || !/true/i.test(f.HasMoreProcessing);
   const hasInvalid = /true/i.test(f.HasInvalidLines);
 
-  // Go to the checkout page so the PO/payment controls render.
+  // Go to the checkout page so the PO/payment controls render. The cart page can
+  // client-side re-render right after load, which destroys the execution context mid-read
+  // ("Execution context was destroyed") — so settle, then read with a retry.
   await page.goto(`${config.base}/en/Checkout`, { waitUntil: 'domcontentloaded' }).catch(() => {});
   await dismissConsent(page);
-  await page.waitForTimeout(1500);
-  const cart = await basketInfo(page);
-  const pay = await selectInvoicePayment(page);
-  const poRes = await setPO(page, po);
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
+  await page.waitForTimeout(2500);
+  let cart = {}, pay = {}, poRes = {};
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      cart = await basketInfo(page);
+      pay = await selectInvoicePayment(page);
+      poRes = await setPO(page, po);
+      break;
+    } catch (e) { poRes = { poSet: false, reason: 'read retry: ' + e.message }; await page.waitForTimeout(2500); }
+  }
 
   const cartUnits = cart.qtySum || cart.totalText || null;
   const ready = importOk && !hasInvalid && expectedUnits > 0 && (cartUnits == null || cartUnits === expectedUnits);
@@ -200,7 +209,7 @@ const CONFIRM_SEL = '#btnConfirm';
 
 // Click a button by id if it's visible; JS-click fallback. Returns whether it clicked.
 async function clickId(page, sel, waitMs = 3500) {
-  const el = await page.$(sel);
+  const el = await page.$(sel).catch(() => null);
   if (!el || !(await el.isVisible().catch(() => false))) return false;
   await el.click({ timeout: 6000 }).catch(async () => { await page.evaluate((s) => document.querySelector(s)?.click(), sel).catch(() => {}); });
   await page.waitForTimeout(waitMs);
