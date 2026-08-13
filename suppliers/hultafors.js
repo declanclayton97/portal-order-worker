@@ -28,23 +28,35 @@ async function pollFor(page, sel, { tries = 40, gap = 1500 } = {}) {
   return null;
 }
 
-// Dismiss a cookie/consent banner if one is covering the page (it eats clicks).
+// Dismiss the cookie/consent modal if one is covering the page (it eats clicks).
+// The banner can render a beat after load, so retry. Prefer the privacy-preserving
+// choice (Decline all / Reject); only fall back to Accept if there's no decline option.
+// Matched in-page by button TEXT so it's robust to the exact markup.
 async function dismissConsent(page) {
-  for (const sel of ['#onetrust-accept-btn-handler', 'button:has-text("Accept all")', 'button:has-text("Accept All")', 'button:has-text("Allow all")', '.cookie-accept', '#acceptCookies']) {
-    const b = await page.$(sel).catch(() => null);
-    if (b && (await b.isVisible().catch(() => false))) { await b.click().catch(() => {}); await page.waitForTimeout(300); return true; }
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const clicked = await page.evaluate(() => {
+      const els = [...document.querySelectorAll('button, a, input[type=button], input[type=submit]')].filter((e) => e.offsetParent !== null);
+      const byText = (re) => els.find((e) => re.test((e.innerText || e.value || '').trim()));
+      const target = byText(/decline all|reject all|only necessary|decline$/i) || byText(/^decline/i) || byText(/^(accept all|allow all)$/i);
+      if (target) { target.click(); return (target.innerText || target.value || '').trim().slice(0, 30); }
+      return null;
+    }).catch(() => null);
+    if (clicked) { await page.waitForTimeout(600); return clicked; }
+    await page.waitForTimeout(700);
   }
-  return false;
+  return null;
 }
 
 export async function login(page, { user, pass }) {
   await page.goto(`${config.base}/User/Login`, { waitUntil: 'domcontentloaded' });
-  await dismissConsent(page);
+  await page.waitForTimeout(800);
+  await dismissConsent(page);           // banner covers the LOGIN button — must clear it first
   const userSel = 'input[name="User.UserName"]';
   const passSel = 'input[name="User.Password"]';
   if (await page.$(passSel)) {
     await page.fill(userSel, user).catch(() => {});
     await page.fill(passSel, pass).catch(() => {});
+    await dismissConsent(page);          // re-clear in case it re-appeared after fill
     // Prefer the form's submit button; fall back to Enter in the password field.
     const btn = await page.$('#loginform button[type=submit], #loginform input[type=submit], button:has-text("Log in"), input[type=submit][value*="Log" i]');
     await Promise.all([
