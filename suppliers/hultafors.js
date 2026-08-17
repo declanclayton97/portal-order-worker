@@ -140,7 +140,26 @@ async function basketInfo(page) {
     const qtySum = qtyBoxes.reduce((a, e) => a + (Number(e.value) || 0), 0);
     const rows = document.querySelectorAll('.basket-row, tr[class*="line" i], .cart-line, [class*="basketRow" i]').length;
     const totalTxt = (document.querySelector('[class*="totalQuantity" i], [id*="totalQuantity" i], .cart-count, #cart-count') || {}).textContent;
-    return { qtyBoxes: qtyBoxes.length, qtySum, rows, totalText: num(totalTxt) };
+    // Per-line prices + the cart's total COST, for the backend's price check (BP cost vs what
+    // Hultafors will actually invoice). Parsed defensively: anything unrecognised comes back
+    // null/[] and NEVER feeds `ready` — the unit-count gate stays the only placement guard.
+    const money = (s) => { const m = String(s || '').match(/(\d[\d,]*\.\d{2})/); return m ? Number(m[1].replace(/,/g, '')) : null; };
+    const bodyTxt = (document.body && document.body.innerText || '').replace(/ /g, ' ');
+    const tm = bodyTxt.match(/Total cost:\s*([\d,]+\.\d{2})/i) || bodyTxt.match(/TOTAL:\s*([\d,]+\.\d{2})/i);
+    const totalCost = tm ? Number(tm[1].replace(/,/g, '')) : null;
+    // Grid row = any <tr> carrying a qty input. Column order is code · description · del.date ·
+    // unit price · list price less discount · qty · line sum, so the first money value on the row
+    // is the unit price we pay and the last is the line total (the date has no decimals, so it
+    // can't be mistaken for money).
+    const lines = [...document.querySelectorAll('tr')].map((tr) => {
+      const q = tr.querySelector('input[name*="Quantity" i], input[id*="qty" i], input.qty');
+      if (!q || tr.offsetParent === null) return null;
+      const txt = (tr.innerText || '').replace(/ /g, ' ');
+      const code = (txt.match(/\b[A-Z0-9][A-Z0-9-]{4,}\b/) || [])[0] || null;
+      const ms = [...txt.matchAll(/(\d[\d,]*\.\d{2})/g)].map((m) => Number(m[1].replace(/,/g, '')));
+      return { code, qty: Number(q.value) || 0, unit: ms.length ? ms[0] : null, sum: ms.length ? ms[ms.length - 1] : null };
+    }).filter(Boolean);
+    return { qtyBoxes: qtyBoxes.length, qtySum, rows, totalText: num(totalTxt), totalCost, lines };
   }).catch(() => ({}));
 }
 
