@@ -177,8 +177,22 @@ async function addLine(page, line, creds) {
     return { ok: false, reason: `size ${size} not found`, diag: { boxCount: boxes.length, labels: labels.map((e) => e.innerText.trim()).slice(0, 24) } };
   }, { size: line.size, qty: line.qty, legIndex: line.legIndex ?? null, legCount: line.legCount ?? null, waist: line.waist ?? null });
   if (!set.ok) return set;
-  // "Add to Order" (on styleinfo.aspx) puts the style in the basket
-  await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), page.click('#ctl00_ContentPlaceHolder1_cmdadd')]);
+  // "Add to Order". Setting a quantity dispatches a change event, and on some styles that posts
+  // back and re-renders the button block — Barkerville loses #cmdadd that way REPRODUCIBLY (it was
+  // the only failure in 18 lines on both the 13:00 and the 13:50 run, while inspect, which never
+  // types a quantity, sees cmdadd present and enabled on that same page). APKHT, 6 boxes and no
+  // pagination, never does it.
+  // Every style page carries TWO identical "Add to Order" controls (cmdadd at the foot, Button1 at
+  // the head), so try each with a SHORT timeout rather than spending 30s on one id. This cannot add
+  // the wrong thing silently: the basket-delta check below fails the line unless the basket grew by
+  // exactly the quantity we asked for.
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
+  let clicked = null;
+  for (const sel of ['#ctl00_ContentPlaceHolder1_cmdadd', '#ctl00_ContentPlaceHolder1_Button1']) {
+    try { await page.click(sel, { timeout: 8000 }); clicked = sel; break; } catch { /* try the other one */ }
+  }
+  if (!clicked) return { ok: false, reason: 'neither "Add to Order" button was clickable', boxId: set.boxId, matchedSize: set.matchedSize };
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
   await page.waitForTimeout(500);
   // Verify the basket actually grew by the full requested qty. A qty box that silently
   // capped (stock limit / validation) leaves the line looking "added" but short — catch it
