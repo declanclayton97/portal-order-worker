@@ -177,21 +177,31 @@ async function addLine(page, line, creds) {
     return { ok: false, reason: `size ${size} not found`, diag: { boxCount: boxes.length, labels: labels.map((e) => e.innerText.trim()).slice(0, 24) } };
   }, { size: line.size, qty: line.qty, legIndex: line.legIndex ?? null, legCount: line.legCount ?? null, waist: line.waist ?? null });
   if (!set.ok) return set;
-  // "Add to Order". Setting a quantity dispatches a change event, and on some styles that posts
-  // back and re-renders the button block — Barkerville loses #cmdadd that way REPRODUCIBLY (it was
-  // the only failure in 18 lines on both the 13:00 and the 13:50 run, while inspect, which never
-  // types a quantity, sees cmdadd present and enabled on that same page). APKHT, 6 boxes and no
-  // pagination, never does it.
-  // Every style page carries TWO identical "Add to Order" controls (cmdadd at the foot, Button1 at
-  // the head), so try each with a SHORT timeout rather than spending 30s on one id. This cannot add
-  // the wrong thing silently: the basket-delta check below fails the line unless the basket grew by
-  // exactly the quantity we asked for.
+  // "Add to Order". Every style page carries TWO identical ones — cmdadd at the foot, Button1 at
+  // the head — so try each briefly rather than spending 30s on a single id.
   await page.waitForLoadState('domcontentloaded').catch(() => {});
+  const ADD_BUTTONS = ['#ctl00_ContentPlaceHolder1_cmdadd', '#ctl00_ContentPlaceHolder1_Button1'];
   let clicked = null;
-  for (const sel of ['#ctl00_ContentPlaceHolder1_cmdadd', '#ctl00_ContentPlaceHolder1_Button1']) {
-    try { await page.click(sel, { timeout: 8000 }); clicked = sel; break; } catch { /* try the other one */ }
+  for (const sel of ADD_BUTTONS) {
+    try { await page.click(sel, { timeout: 5000 }); clicked = sel; break; } catch { /* try the other */ }
   }
-  if (!clicked) return { ok: false, reason: 'neither "Add to Order" button was clickable', boxId: set.boxId, matchedSize: set.matchedSize };
+  if (!clicked) {
+    // page.click also waits for the element to be STABLE (not moving) and to RECEIVE EVENTS. On
+    // Barkerville neither button ever satisfies that, though a screenshot of the failure shows
+    // "Add to Order" plainly sitting there and inspect() reports it visible and enabled — the page
+    // has an auto-rotating carousel and lazily-loaded thumbnails, so the layout never settles.
+    // Failing that check is not the same as the button being unusable, so fall back to a DOM click
+    // on one we have already confirmed VISIBLE. An ASP.NET submit posts back identically either way.
+    for (const sel of ADD_BUTTONS) {
+      if (!(await isVisible(page, sel))) continue;
+      try {
+        await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), page.$eval(sel, (e) => e.click())]);
+        clicked = `${sel} (dom)`;
+        break;
+      } catch { /* try the other */ }
+    }
+  }
+  if (!clicked) return { ok: false, reason: 'no "Add to Order" button could be clicked', boxId: set.boxId, matchedSize: set.matchedSize };
   await page.waitForLoadState('domcontentloaded').catch(() => {});
   await page.waitForTimeout(500);
   // Verify the basket actually grew by the full requested qty. A qty box that silently
