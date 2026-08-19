@@ -201,16 +201,28 @@ async function addLine(page, line, creds) {
       } catch { /* try the other */ }
     }
   }
-  if (!clicked) return { ok: false, reason: 'no "Add to Order" button could be clicked', boxId: set.boxId, matchedSize: set.matchedSize };
+  // THE BASKET IS THE TRUTH, not the click. Setting a quantity fires a change event that on some
+  // styles posts back and adds the line by itself, so a line can land even when Playwright reports
+  // no clickable button — driving PO 483316 on 19 Aug, twelve of eighteen lines reported "no Add to
+  // Order button could be clicked" or "qty short" while the basket held all 22 units, every one of
+  // them actually added. Judging by the mechanism instead of the outcome turned a completed basket
+  // into a refused order.
+  // And the count is only right once the postback settles, so poll for it rather than sleeping a
+  // fixed 500ms and reading a stale page.
   await page.waitForLoadState('domcontentloaded').catch(() => {});
-  await page.waitForTimeout(500);
-  // Verify the basket actually grew by the full requested qty. A qty box that silently
-  // capped (stock limit / validation) leaves the line looking "added" but short — catch it
-  // here so a partial line fails the line (added<lines) and the order won't place.
-  const cartAfter = await cartCount(page);
-  const delta = cartAfter - cartBefore;
-  if (delta !== wantQty) return { ok: false, reason: `qty short: basket +${delta}, wanted ${wantQty}`, boxId: set.boxId, matchedSize: set.matchedSize, cartBefore, cartAfter };
-  return { ok: true, boxId: set.boxId, matchedSize: set.matchedSize };
+  let cartAfter = cartBefore, delta = 0;
+  for (let i = 0; i < 16; i++) {
+    await page.waitForTimeout(500);
+    cartAfter = await cartCount(page);
+    delta = cartAfter - cartBefore;
+    if (delta === wantQty) break;
+  }
+  // Still the same guard as before: the basket must have grown by EXACTLY what we asked for. A box
+  // that silently capped, or a click that fired into nothing, fails the line and stops the order.
+  if (delta !== wantQty) {
+    return { ok: false, reason: clicked ? `qty short: basket +${delta}, wanted ${wantQty}` : `no "Add to Order" button could be clicked and the basket did not grow (+${delta}, wanted ${wantQty})`, boxId: set.boxId, matchedSize: set.matchedSize, cartBefore, cartAfter };
+  }
+  return { ok: true, boxId: set.boxId, matchedSize: set.matchedSize, addedVia: clicked || 'qty-postback' };
 }
 
 // Diagnostic: for each line, search + open the best result, then dump the size grid's
