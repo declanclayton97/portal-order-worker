@@ -97,6 +97,10 @@ async function clearBasket(page) {
 }
 
 // Add ONE line to the basket. Returns { ok, reason }.
+// A selector can resolve and still be unusable. Playwright fill/click wait for VISIBILITY, so any
+// readiness check that gates them must test the same thing — page.$ alone does not.
+const isVisible = (page, sel) => page.locator(sel).first().isVisible().catch(() => false);
+
 async function addLine(page, line, creds) {
   const q = searchTerm(line.search, line.colour);
   const wantQty = Number(line.qty) || 1;
@@ -104,10 +108,16 @@ async function addLine(page, line, creds) {
   // Recover the session/page if it dropped: without the search box (e.g. bounced to
   // login after many ops), go back to Styles and re-login. Prevents one bad line from
   // cascading fill-timeouts through the rest of the order.
-  if (!(await page.$('#ctl00_txtsearch'))) {
+  // VISIBILITY, not existence. page.$ returns a handle for a hidden element, so this guard used to
+  // pass on a styleinfo page — where #ctl00_txtsearch IS in the DOM but is not visible — and the
+  // fill below then burned its full 30s timeout. On 19 Aug that turned ONE bad line (Barkerville,
+  // whose Add-to-Order click timed out and left us parked on its page) into 17 identical failures
+  // and an 8-minute run: "locator resolved to <input> ... element is not visible", sixteen times.
+  // Recovering here is exactly what this block was written for; it was just asking the wrong thing.
+  if (!(await isVisible(page, '#ctl00_txtsearch'))) {
     await page.goto(`${config.base}/styles.aspx?f=0`, { waitUntil: 'domcontentloaded' }).catch(() => {});
     if (creds && (!(await page.$('#ctl00_btnLogout')) || await page.$('#ctl00_Login1_Password'))) { try { await login(page, creds); } catch {} }
-    if (!(await page.$('#ctl00_txtsearch'))) return { ok: false, reason: 'search box unavailable (session recovery failed)' };
+    if (!(await isVisible(page, '#ctl00_txtsearch'))) return { ok: false, reason: 'search box unavailable (session recovery failed)' };
   }
   // search
   await page.fill('#ctl00_txtsearch', q);
@@ -187,7 +197,7 @@ export async function inspect(page, { lines, creds }) {
   for (const line of lines) {
     const q = searchTerm(line.search, line.colour);
     try {
-      if (!(await page.$('#ctl00_txtsearch'))) { await page.goto(`${config.base}/styles.aspx?f=0`, { waitUntil: 'domcontentloaded' }).catch(() => {}); if (creds) { try { await login(page, creds); } catch {} } }
+      if (!(await isVisible(page, '#ctl00_txtsearch'))) { await page.goto(`${config.base}/styles.aspx?f=0`, { waitUntil: 'domcontentloaded' }).catch(() => {}); if (creds) { try { await login(page, creds); } catch {} } }
       await page.fill('#ctl00_txtsearch', q);
       await Promise.all([page.waitForLoadState('domcontentloaded').catch(() => {}), page.click('#ctl00_btnsearch')]);
       await page.waitForTimeout(400);
