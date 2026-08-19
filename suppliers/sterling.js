@@ -217,7 +217,15 @@ export async function inspect(page, { lines, creds }) {
         // The whole style block's raw text (rows in order) + any row-lead cells
         const block = document.querySelector('[id*="rpColour"]') || document.querySelector('table');
         const rowLeads = [...document.querySelectorAll('tr')].map((tr) => (tr.querySelector('td,th')?.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 30);
-        return { boxes, title: (document.querySelector('h1,h2,.styletitle')?.innerText || '').trim(), blockText: (block?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 600), rowLeads };
+        // Every clickable control, with the two properties Playwright actually gates on. The whole
+        // point of the 19 Aug post-mortem was that "the selector resolves" and "the selector is
+        // usable" are different questions, so record BOTH rather than just presence.
+        const buttons = [...document.querySelectorAll('input[type=submit],input[type=button],input[type=image],button,a[id*=cmd]')].map((e) => ({
+          id: e.id || '', name: e.name || '', tag: e.tagName, type: e.type || '',
+          label: (e.value || e.alt || e.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 40),
+          visible: !!(e.offsetParent || e.getClientRects().length), disabled: !!e.disabled,
+        })).filter((b) => b.id || b.label);
+        return { boxes, buttons, title: (document.querySelector('h1,h2,.styletitle')?.innerText || '').trim(), blockText: (block?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 600), rowLeads };
       });
       out.push({ search: q, wantColour: line.colour, size: line.size, styleids, resultScores: breakdown, chosenStyleUrl: page.url(), ...grid });
     } catch (e) { out.push({ search: q, size: line.size, error: e.message }); }
