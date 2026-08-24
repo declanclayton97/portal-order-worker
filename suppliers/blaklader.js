@@ -52,15 +52,44 @@ const cartCookie = (jar) => {
   return k ? { name: k, value: jar[k] } : null;
 };
 
-// The consent banner sits over the page on a cold context and swallows clicks.
+// The consent banner is a MODAL over the whole page on a cold context, and it swallows every click
+// underneath — the first inspect run died at www.blaklader.uk/en with it still up. It is not
+// OneTrust (the screenshot shows a third-party "Cookie Banner powered by …"), and it may live in an
+// IFRAME, which is why a plain page.$ found nothing. So search every frame, not just the main one.
+const CONSENT_SELS = [
+  '#onetrust-accept-btn-handler',
+  'button:has-text("Accept all")',
+  'button:has-text("Accept All")',
+  'button:has-text("Save + Exit")',
+  '[aria-label*="Accept" i]',
+  'button[title*="Accept" i]',
+];
 async function dismissConsent(page) {
-  const sels = ['#onetrust-accept-btn-handler', 'button:has-text("Accept All")', 'button:has-text("Accept all")', '[aria-label="Accept all"]'];
-  for (const s of sels) {
-    const el = await page.$(s).catch(() => null);
-    if (el) { await el.click({ timeout: 3000 }).catch(() => {}); await page.waitForTimeout(400); return true; }
+  for (let pass = 0; pass < 2; pass++) {
+    for (const frame of page.frames()) {
+      for (const s of CONSENT_SELS) {
+        const el = await frame.$(s).catch(() => null);
+        if (!el) continue;
+        await el.click({ timeout: 3000 }).catch(() => {});
+        await page.waitForTimeout(600);
+        return true;
+      }
+    }
+    await page.waitForTimeout(700);   // it can mount a beat after domcontentloaded
   }
   return false;
 }
+
+// Anything that opens the login. The live page uses a "SIGN IN" button top-right and a "LOGIN"
+// link in the footer — neither matched the first attempt's selectors, which only knew "Log in".
+const LOGIN_ENTRY = [
+  'button:has-text("Sign in")', 'a:has-text("Sign in")',
+  'button:has-text("Sign In")', 'a:has-text("Sign In")',
+  'a:has-text("Login")', 'button:has-text("Login")',
+  'button:has-text("Log in")', 'a:has-text("Log in")',
+  'a[href*="/auth/login"]',
+];
+const PASS_SEL = 'input[name="Password"], input[type="password"]';
 
 // LOG IN. The storefront bounces to login.blaklader.com (IdentityServer + an ASP.NET form) and
 // back again, and it is the RETURN leg that sets Blk._Auth — the thing no server-side flow gets.
@@ -70,34 +99,40 @@ async function dismissConsent(page) {
 // __RequestVerificationToken). Entry points ARE guessed, so several are tried and success is
 // judged by the password field appearing, never by a URL matching.
 export async function login(page, { user, pass }) {
-  const entries = [`${config.base}/en/checkout`, `${config.base}/auth/login`, `${config.base}/en`];
+  const entries = [`${config.base}/en`, `${config.base}/en/checkout`, `${config.base}/auth/login`];
   let onForm = false;
+  const tried = [];
   for (const url of entries) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    // Clear the modal FIRST — it covers the SIGN IN button, so every click below is a no-op
+    // until it is gone. That is what stalled the first run.
     await dismissConsent(page);
-    if (await page.$('input[name="Password"]').catch(() => null)) { onForm = true; break; }
-    // Not bounced automatically — look for a sign-in affordance and follow it.
-    const link = await page.$('a[href*="/auth/login"], a[href*="login" i], button:has-text("Log in"), a:has-text("Log in"), a:has-text("Sign in")').catch(() => null);
-    if (link) {
-      await link.click({ timeout: 5000 }).catch(() => {});
-      await page.waitForTimeout(2500);
+    await page.waitForTimeout(500);
+    if (await page.$(PASS_SEL).catch(() => null)) { onForm = true; break; }
+    for (const sel of LOGIN_ENTRY) {
+      const el = await page.$(sel).catch(() => null);
+      if (!el) continue;
+      tried.push(sel);
+      await el.click({ timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(3000);
       await dismissConsent(page);
-      if (await page.$('input[name="Password"]').catch(() => null)) { onForm = true; break; }
+      if (await page.$(PASS_SEL).catch(() => null)) { onForm = true; break; }
     }
+    if (onForm) break;
     if (hasAuth(await cookieMap(page))) return { alreadyAuthed: true, url: page.url() };
   }
   if (!onForm) {
     const jar = await cookieMap(page);
     if (hasAuth(jar)) return { alreadyAuthed: true, url: page.url() };
-    throw new Error(`could not reach the Blaklader login form (last url ${page.url()})`);
+    throw new Error(`could not reach the Blaklader login form (last url ${page.url()}; entries clicked: ${tried.join(" | ") || "none matched"})`);
   }
 
   await page.fill('input[name="Email"]', user).catch(async () => { await page.fill('input[type="email"]', user); });
-  await page.fill('input[name="Password"]', pass);
+  await page.fill(PASS_SEL, pass);
   await dismissConsent(page);
   await Promise.all([
     page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {}),
-    page.click('button[type="submit"], input[type="submit"], button:has-text("Log in")').catch(() => page.press('input[name="Password"]', 'Enter')),
+    page.click('button[type="submit"], input[type="submit"], button:has-text("Log in"), button:has-text("Sign in")').catch(() => page.press(PASS_SEL, 'Enter')),
   ]);
   // The OIDC bounce back through /auth/login is what mints the cookie, and it finishes in JS —
   // so wait for the cookie itself rather than for any particular URL to settle.
