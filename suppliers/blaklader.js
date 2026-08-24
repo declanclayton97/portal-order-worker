@@ -75,7 +75,11 @@ const CONSENT_SELS = [
 // the overlay outright — an un-dismissable banner must not be the thing that stops an order.
 async function dismissConsent(page) {
   const clickByText = async (frame) => frame.evaluate(() => {
-    const WANTED = ['accept all', 'accept all cookies', 'alle akzeptieren', 'save + exit', 'accept'];
+    // A CHAIN of modals, not one. Clearing consent revealed a second "SHOW PRICE / INCL. VAT"
+    // dialog behind it, blocking clicks identically — so this list covers both and the caller
+    // loops until nothing more is found. "close" is generic, but it only ever runs while a
+    // blocking overlay is up, and the loop stops as soon as clicks land on the page again.
+    const WANTED = ['accept all', 'accept all cookies', 'alle akzeptieren', 'save + exit', 'accept', 'close'];
     const seen = new Set();
     const walk = (root) => {
       if (!root || seen.has(root)) return false;
@@ -90,12 +94,18 @@ async function dismissConsent(page) {
     return walk(document);
   }).catch(() => false);
 
-  for (let pass = 0; pass < 3; pass++) {
+  // Keep clearing until nothing is left — dismissing one modal reveals the next.
+  let cleared = 0;
+  for (let pass = 0; pass < 6; pass++) {
+    let hit = false;
     for (const frame of page.frames()) {
-      if (await clickByText(frame)) { await page.waitForTimeout(800); return true; }
+      if (await clickByText(frame)) { hit = true; cleared++; await page.waitForTimeout(800); break; }
     }
+    if (hit) continue;
+    if (cleared) return true;         // cleared everything we could find
     await page.waitForTimeout(900);   // it mounts a beat after domcontentloaded
   }
+  if (cleared) return true;
 
   // Last resort: strip it. Consent is not what we are here for, and a modal we cannot click is
   // otherwise a hard stop.
