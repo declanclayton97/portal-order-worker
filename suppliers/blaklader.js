@@ -64,19 +64,49 @@ const CONSENT_SELS = [
   '[aria-label*="Accept" i]',
   'button[title*="Accept" i]',
 ];
+// Selector-based dismissal FAILED twice: the CMP is consentmanager.net (the __cmpconsent93117 /
+// __cmpcccu93117 cookies give it away) and it renders into a SHADOW ROOT, which CSS selectors do
+// not reliably reach. Both runs clicked SIGN IN with the modal still covering it — and because
+// click errors are swallowed, it looked like the click happened. Nothing underneath is reachable
+// until the banner goes.
+//
+// So do it INSIDE the page: walk the DOM and every open shadow root, match on the button's own
+// text, and click it directly. Frames too, since a CMP is often iframed. Falls back to removing
+// the overlay outright — an un-dismissable banner must not be the thing that stops an order.
 async function dismissConsent(page) {
-  for (let pass = 0; pass < 2; pass++) {
-    for (const frame of page.frames()) {
-      for (const s of CONSENT_SELS) {
-        const el = await frame.$(s).catch(() => null);
-        if (!el) continue;
-        await el.click({ timeout: 3000 }).catch(() => {});
-        await page.waitForTimeout(600);
-        return true;
+  const clickByText = async (frame) => frame.evaluate(() => {
+    const WANTED = ['accept all', 'accept all cookies', 'alle akzeptieren', 'save + exit', 'accept'];
+    const seen = new Set();
+    const walk = (root) => {
+      if (!root || seen.has(root)) return false;
+      seen.add(root);
+      for (const el of root.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"]')) {
+        const t = (el.textContent || el.value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (WANTED.includes(t)) { el.click(); return true; }
       }
+      for (const el of root.querySelectorAll('*')) if (el.shadowRoot && walk(el.shadowRoot)) return true;
+      return false;
+    };
+    return walk(document);
+  }).catch(() => false);
+
+  for (let pass = 0; pass < 3; pass++) {
+    for (const frame of page.frames()) {
+      if (await clickByText(frame)) { await page.waitForTimeout(800); return true; }
     }
-    await page.waitForTimeout(700);   // it can mount a beat after domcontentloaded
+    await page.waitForTimeout(900);   // it mounts a beat after domcontentloaded
   }
+
+  // Last resort: strip it. Consent is not what we are here for, and a modal we cannot click is
+  // otherwise a hard stop.
+  await page.evaluate(() => {
+    for (const el of document.querySelectorAll('[id*="cmp" i],[class*="cmp" i],[id*="consent" i],[class*="consent" i],[id*="usercentrics" i]')) {
+      const cs = getComputedStyle(el);
+      if (cs.position === 'fixed' || cs.position === 'absolute' || Number(cs.zIndex) > 100) el.remove();
+    }
+    document.documentElement.style.overflow = 'auto';
+    document.body.style.overflow = 'auto';
+  }).catch(() => {});
   return false;
 }
 
@@ -114,9 +144,15 @@ export async function login(page, { user, pass }) {
       if (!el) continue;
       tried.push(sel);
       await el.click({ timeout: 5000 }).catch(() => {});
-      await page.waitForTimeout(3000);
-      await dismissConsent(page);
-      if (await page.$(PASS_SEL).catch(() => null)) { onForm = true; break; }
+      // Poll rather than sleep once: this click usually redirects to login.blaklader.com, and a
+      // fixed 3s wait was declaring failure before IdentityServer had even answered.
+      for (let w = 0; w < 12 && !onForm; w++) {
+        await page.waitForTimeout(1000);
+        if (await page.$(PASS_SEL).catch(() => null)) onForm = true;
+      }
+      if (!onForm) await dismissConsent(page);
+      if (await page.$(PASS_SEL).catch(() => null)) onForm = true;
+      if (onForm) break;
     }
     if (onForm) break;
     if (hasAuth(await cookieMap(page))) return { alreadyAuthed: true, url: page.url() };
