@@ -373,6 +373,20 @@ export async function diagnose(page, { codes = [], shots = 2 } = {}) {
       await page.goto(`${config.base}/en`, { waitUntil: 'domcontentloaded' }).catch(() => {});
       await dismissConsent(page);
       await page.waitForTimeout(800);
+      // CAPTURE THE LANDING PAGE FIRST. The first live run found no search box and returned
+      // nothing at all — no url, no text, no shot — so there was no way to see WHY. A failure has
+      // to come back with the evidence needed to fix it, or it is just a slower guess.
+      r.landing = await page.evaluate(() => ({
+        url: location.href,
+        title: document.title,
+        text: (document.body && document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 1200),
+        // What IS on the page, so the next version can stop guessing at the shape of the search UI.
+        inputs: [...document.querySelectorAll('input')].filter((e) => e.offsetParent !== null && e.type !== 'hidden')
+          .map((e) => `${e.type}|${e.name || ''}|${e.id || ''}|${e.placeholder || ''}`).slice(0, 15),
+        navLinks: [...document.querySelectorAll('a')].filter((e) => e.offsetParent !== null)
+          .map((e) => `${(e.innerText || '').trim().slice(0, 24)} -> ${e.getAttribute('href') || ''}`)
+          .filter((s) => s && !s.startsWith(' ->')).slice(0, 25),
+      })).catch(() => null);
       // Find a search box by SHAPE, not by a memorised selector.
       const box = await page.evaluate(() => {
         const cand = [...document.querySelectorAll('input')].filter((e) => {
@@ -386,7 +400,13 @@ export async function diagnose(page, { codes = [], shots = 2 } = {}) {
         return { id: e.id, name: e.name || null, placeholder: e.placeholder || null };
       });
       r.searchBox = box;
-      if (!box) { r.error = 'no search input found on the landing page'; results.push(r); continue; }
+      if (!box) {
+        r.error = 'no search input found on the landing page';
+        // Bring back a picture too — the landing dump above says what is there, the shot says what
+        // it looks like, and between them the next version knows where search actually lives.
+        if (results.length < shots) r.screenshot = `data:image/png;base64,${(await page.screenshot({ fullPage: false }).catch(() => Buffer.from(''))).toString('base64')}`;
+        results.push(r); continue;
+      }
       await page.fill(`#${box.id}`, String(code)).catch(() => {});
       await page.press(`#${box.id}`, 'Enter').catch(() => {});
       await page.waitForLoadState('domcontentloaded').catch(() => {});
