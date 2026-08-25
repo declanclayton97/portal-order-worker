@@ -214,11 +214,52 @@ export async function stage(page, { lines, keepBasket, purchaseOrder, ref } = {}
 
   const cartUnits = cart.qtySum || cart.totalText || null;
   const ready = importOk && !hasInvalid && expectedUnits > 0 && (cartUnits == null || cartUnits === expectedUnits);
+  // WHICH lines did not make it in. The CSV import adds what it likes and says NOTHING about what
+  // it refused — a discontinued code and a sub-pack quantity are simply absent, and the unit gate
+  // above then blocks the order without naming either. On 2026-08-25 that stranded £4,350 on the
+  // checkout page, and the two culprits (28003100004 discontinued, 20031-091 sold in 20s) were
+  // only found by diffing the PO against this cart BY HAND.
+  //
+  // NOT the HasInvalidLines flag: it reads True on the UPLOAD step even on a completely healthy
+  // run (observed on the good staging run the same day), so alerting on it would cry wolf on
+  // every order. What is trustworthy is that we know what we asked for and can read what is there.
+  //
+  // STRICTLY DIAGNOSTIC — deliberately computed AFTER `ready` and never fed into it. The basket
+  // codes are scraped from grid text with a loose pattern, so a mis-parse must be able to produce a
+  // wrong `missingLines` entry without ever blocking an order that the unit count says is correct.
+  const missingLines = diffRequestedAgainstCart(lines, cart.lines);
   const screenshot = ready ? null : `data:image/png;base64,${(await page.screenshot({ fullPage: true }).catch(() => Buffer.from(''))).toString('base64')}`;
   return {
     imported: importOk, hasInvalidLines: hasInvalid, importSteps: imp.steps,
     expectedUnits, cart, payment: pay, po: poRes, checkoutUrl: page.url(), ready, screenshot,
+    missingLines,
   };
+}
+
+// Requested vs what the basket grid holds. Returns one entry per line that is absent or short:
+//   { stockCode, wanted, inCart, reason: 'not in basket' | 'short' }
+// Codes are compared case-insensitively with separators stripped, because the grid text is scraped
+// rather than read from a field — "20031-091" there may be "20031091" here.
+// Returns [] when the grid could not be parsed at all: "we could not read it" must never be
+// reported as "these lines are missing".
+function diffRequestedAgainstCart(requested = [], cartLines) {
+  if (!Array.isArray(cartLines) || !cartLines.length) return [];
+  const norm = (s) => String(s || '').toUpperCase().replace(/[\s_-]/g, '');
+  const inCart = new Map();
+  for (const l of cartLines) {
+    const k = norm(l.code);
+    if (k) inCart.set(k, (inCart.get(k) || 0) + (Number(l.qty) || 0));
+  }
+  const out = [];
+  for (const r of requested) {
+    const code = r.stockCode || r.sku;
+    const want = Number(r.qty) || 0;
+    if (!code || want <= 0) continue;
+    const got = inCart.get(norm(code)) || 0;
+    if (got === 0) out.push({ stockCode: code, wanted: want, inCart: 0, reason: 'not in basket' });
+    else if (got < want) out.push({ stockCode: code, wanted: want, inCart: got, reason: 'short' });
+  }
+  return out;
 }
 
 // The Hultafors checkout is a fixed accordion, each step advanced by a STABLE button id
