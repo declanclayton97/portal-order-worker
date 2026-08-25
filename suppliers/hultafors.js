@@ -212,7 +212,14 @@ export async function stage(page, { lines, keepBasket, purchaseOrder, ref } = {}
     } catch (e) { poRes = { poSet: false, reason: 'read retry: ' + e.message }; await page.waitForTimeout(2500); }
   }
 
-  const cartUnits = cart.qtySum || cart.totalText || null;
+  // ZERO IS A READING, NOT A MISSING READING. This was `cart.qtySum || cart.totalText || null`,
+  // and qtySum of 0 is falsy — so an EMPTY basket collapsed to null, the gate read that as "could
+  // not count the cart", and `ready` came back TRUE with nothing in it. Caught 2026-08-25 asking
+  // for 2 units, getting 0, and being told it was ready to place. This is the only placement guard
+  // there is, so it must not fail open on the one value that means "nothing went in".
+  const cartUnits = typeof cart.qtySum === 'number' ? cart.qtySum
+    : (cart.totalText != null ? cart.totalText : null);
+  const cartReadable = typeof cart.qtySum === 'number';
   const ready = importOk && !hasInvalid && expectedUnits > 0 && (cartUnits == null || cartUnits === expectedUnits);
   // WHICH lines did not make it in. The CSV import adds what it likes and says NOTHING about what
   // it refused — a discontinued code and a sub-pack quantity are simply absent, and the unit gate
@@ -227,7 +234,7 @@ export async function stage(page, { lines, keepBasket, purchaseOrder, ref } = {}
   // STRICTLY DIAGNOSTIC — deliberately computed AFTER `ready` and never fed into it. The basket
   // codes are scraped from grid text with a loose pattern, so a mis-parse must be able to produce a
   // wrong `missingLines` entry without ever blocking an order that the unit count says is correct.
-  const missingLines = diffRequestedAgainstCart(lines, cart.lines);
+  const missingLines = diffRequestedAgainstCart(lines, cart.lines, cartReadable);
   const screenshot = ready ? null : `data:image/png;base64,${(await page.screenshot({ fullPage: true }).catch(() => Buffer.from(''))).toString('base64')}`;
   return {
     imported: importOk, hasInvalidLines: hasInvalid, importSteps: imp.steps,
@@ -242,8 +249,15 @@ export async function stage(page, { lines, keepBasket, purchaseOrder, ref } = {}
 // rather than read from a field — "20031-091" there may be "20031091" here.
 // Returns [] when the grid could not be parsed at all: "we could not read it" must never be
 // reported as "these lines are missing".
-function diffRequestedAgainstCart(requested = [], cartLines) {
-  if (!Array.isArray(cartLines) || !cartLines.length) return [];
+// `readable` distinguishes the two cases that look identical from here: a basket we could not read,
+// and a basket that is genuinely EMPTY. Without it, the run on 2026-08-25 where Hultafors rejected
+// BOTH requested codes reported nothing missing — the one time every line was missing.
+function diffRequestedAgainstCart(requested = [], cartLines, readable = false) {
+  if (!Array.isArray(cartLines) || !cartLines.length) {
+    if (!readable) return [];                       // could not read it — say nothing, never guess
+    return requested.filter((r) => (r.stockCode || r.sku) && (Number(r.qty) || 0) > 0)
+      .map((r) => ({ stockCode: r.stockCode || r.sku, wanted: Number(r.qty) || 0, inCart: 0, reason: 'not in basket' }));
+  }
   const norm = (s) => String(s || '').toUpperCase().replace(/[\s_-]/g, '');
   const inCart = new Map();
   for (const l of cartLines) {
