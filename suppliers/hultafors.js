@@ -338,3 +338,66 @@ export async function place(page, { ref } = {}) {
   const screenshot = placed ? null : `data:image/png;base64,${(await page.screenshot({ fullPage: true }).catch(() => Buffer.from(''))).toString('base64')}`;
   return { placed, orderNo, trail: w.trail, url: page.url(), poSet: w.poRes.value || null, statusText: String(statusText).replace(/\s+/g, ' ').slice(0, 400), screenshot };
 }
+
+// ── WHY was a line dropped? ───────────────────────────────────────────────────
+// missingLines names the codes; this goes and asks the portal about each one.
+// The two causes seen so far are invisible from our side: 28003100004 was DISCONTINUED and
+// 20031-091 is sold in PACKS OF 20 (owner, 2026-08-25). Both were diagnosed by a human logging in.
+//
+// DELIBERATELY EVIDENCE-FIRST. The Blaklader login cost three rounds of selector-guessing and was
+// solved in one look at a screenshot, so this does NOT assume a page shape it has never seen: it
+// FINDS the search control, then brings back the URL it landed on, the page text and a screenshot.
+// The keyword extraction is a bonus on top of that evidence, never a substitute for it — when the
+// parse misses, the text and the shot are still there to read, and `searchUrl` records the pattern
+// so a later version can navigate straight to it.
+// Read-only: it searches and reads. It never touches the basket or the checkout.
+export async function diagnose(page, { codes = [], shots = 2 } = {}) {
+  const results = [];
+  for (const code of codes.slice(0, 12)) {
+    const r = { code };
+    try {
+      await page.goto(`${config.base}/en`, { waitUntil: 'domcontentloaded' }).catch(() => {});
+      await dismissConsent(page);
+      await page.waitForTimeout(800);
+      // Find a search box by SHAPE, not by a memorised selector.
+      const box = await page.evaluate(() => {
+        const cand = [...document.querySelectorAll('input')].filter((e) => {
+          if (e.offsetParent === null || e.type === 'hidden') return false;
+          const s = `${e.type} ${e.name} ${e.id} ${e.placeholder} ${e.className}`.toLowerCase();
+          return e.type === 'search' || /search|sok|sök|query|find|article|product/.test(s);
+        });
+        if (!cand.length) return null;
+        const e = cand[0];
+        if (!e.id) e.id = 'clx-search-' + Math.floor(performance.now());
+        return { id: e.id, name: e.name || null, placeholder: e.placeholder || null };
+      });
+      r.searchBox = box;
+      if (!box) { r.error = 'no search input found on the landing page'; results.push(r); continue; }
+      await page.fill(`#${box.id}`, String(code)).catch(() => {});
+      await page.press(`#${box.id}`, 'Enter').catch(() => {});
+      await page.waitForLoadState('domcontentloaded').catch(() => {});
+      await page.waitForTimeout(2500);
+      const seen = await page.evaluate(() => ({
+        url: location.href,
+        title: document.title,
+        text: (document.body && document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 3000),
+      }));
+      r.searchUrl = seen.url; r.title = seen.title; r.text = seen.text;
+      // Best-effort flags. Multilingual because the portal is a Nordic group's and falls back to
+      // Swedish strings in places (utgått = discontinued, förp = pack).
+      const t = String(seen.text || '');
+      r.flags = {
+        discontinued: /discontinued|utg\u00e5tt|expired|no longer available|withdrawn|obsolete|end of life/i.test(t),
+        noHits: /no (results|hits|products found)|inga tr\u00e4ffar|0 results/i.test(t),
+        packHint: (t.match(/(?:pack(?:age)?\s*(?:size|of|qty)?|f\u00f6rp|multiple of|sold in)\D{0,12}(\d{1,4})/i) || [])[1] || null,
+        minOrderHint: (t.match(/min(?:imum)?\s*(?:order)?\s*(?:qty|quantity)\D{0,12}(\d{1,4})/i) || [])[1] || null,
+        outOfStock: /out of stock|no stock|slut i lager|not in stock/i.test(t),
+      };
+      if (results.length < shots) {
+        r.screenshot = `data:image/png;base64,${(await page.screenshot({ fullPage: false }).catch(() => Buffer.from(''))).toString('base64')}`;
+      }
+    } catch (e) { r.error = String(e.message || e).slice(0, 200); }
+    results.push(r);
+  }
+  return { diagnosed: results.length, results };
+}

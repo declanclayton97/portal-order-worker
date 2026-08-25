@@ -49,6 +49,14 @@ async function runOrder({ supplier, ref, lines, opts = {}, execute }) {
     if (opts.inspect && mod.inspect) { const insp = await mod.inspect(page, { lines, creds: { user, pass } }); await browser.close(); return { ok: true, inspect: true, supplier, ref, ...insp, ms: Date.now() - t0 }; }
     if (opts.checkoutProbe && mod.checkoutProbe) { const staged = await mod.stage(page, { lines, creds: { user, pass }, ...opts }); const probe = await mod.checkoutProbe(page); await browser.close(); return { ok: true, checkoutProbe: true, supplier, ref, staged: { added: staged.added, cart: staged.cartCount, units: staged.units, ready: staged.ready }, ...probe, ms: Date.now() - t0 }; }
     if (opts.ordersList && mod.ordersList) { const ol = await mod.ordersList(page); await browser.close(); return { ok: true, ordersList: true, supplier, ref, ...ol, ms: Date.now() - t0 }; }
+    // Ask the portal WHY a line was dropped. Read-only: searches and reads, never touches the
+    // basket or the checkout. opts.diagnose = ['<code>', …] (or true, to take them from lines[]).
+    if (opts.diagnose && mod.diagnose) {
+      const codes = Array.isArray(opts.diagnose) ? opts.diagnose : lines.map((l) => l.stockCode || l.sku).filter(Boolean);
+      const dg = await mod.diagnose(page, { codes, shots: opts.shots == null ? 2 : opts.shots });
+      await browser.close();
+      return { ok: true, diagnose: true, supplier, ref, ...dg, ms: Date.now() - t0 };
+    }
     const staged = await mod.stage(page, { lines, creds: { user, pass }, ...opts });
     if (!execute) { await browser.close(); return { ok: true, dryRun: true, supplier, ref, ...staged, ms: Date.now() - t0 }; }
     if (!staged.ready) { await browser.close(); return { ok: false, error: 'not ready to place', supplier, ref, ...staged }; }
