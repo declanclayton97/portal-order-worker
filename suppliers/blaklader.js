@@ -331,12 +331,20 @@ export async function cartProbe(page, { tries = 4 } = {}) {
         empty: /your (cart|basket) is empty|no items/i.test(txt),
         // A cart icon / count in the header is the visible proof the session owns a cart.
         cartIndicator: !!document.querySelector('[class*="cart" i],[id*="cart" i],[data-testid*="cart" i],a[href*="/cart" i],a[href*="/checkout" i]'),
+        // The cart total, so a reprice is visible as a NUMBER even if the wording changes.
+        cartTotal: (txt.match(/£s?([d,]+.d{2})/) || [])[1] || null,
         text: txt.slice(0, 1500),
       };
     }).catch(() => ({}));
     attempts.push({ attempt: i + 1, httpStatus, ...seen });
-    // Once it renders a repriced, non-error cart there is nothing to gain from refreshing again.
-    if (seen && !seen.errorPage && (seen.repriced || seen.cartIndicator)) break;
+    // STOP ONLY ON THE REPRICE. The first version broke as soon as a cart was VISIBLE, and that is
+    // not the event that matters: the owner's cart rendered too, and still would not order. What
+    // unblocked theirs was the notice that prices had been adjusted to the correct price list,
+    // which arrives only after several refreshes. Breaking on cartIndicator ended the experiment
+    // one step before the interesting part (2026-08-26).
+    // The price gap says the same thing: the storefront showed GBP1,273.79 against our PO net of
+    // GBP1,255.91, so the cart is priced on the wrong list until it is corrected.
+    if (seen && seen.repriced) break;
     await page.waitForTimeout(2500);
   }
   const shot = `data:image/png;base64,${(await page.screenshot({ fullPage: false }).catch(() => Buffer.from(''))).toString('base64')}`;
