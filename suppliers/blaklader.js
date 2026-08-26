@@ -245,6 +245,67 @@ export async function stage(page, { lines = [], body = null, cartId = null } = {
 // Fire ONCE. On an ambiguous result (timeout, transport error) do NOT retry: read the cart back
 // through the backend instead. A consumed cart means the order went through, and a blind retry is
 // how a live order gets placed twice.
+// OPEN THE CART AT CHECKOUT BEFORE SUBMITTING — and read what it will actually charge.
+//
+// The cart is built server-side against api.blaklader.com and arrives on the WRONG PRICE LIST. The
+// storefront corrects it only when the cart is VIEWED, and says so per line:
+//   "Half-zip 2-tone sweatshirt 335311589996 has been updated with the correct priceList.
+//    The price might have changed.."
+// Until that has happened, POST /api/orders/send answers a bare 500 "Internal Server Error" — no
+// field list, nothing to diagnose. Eight attempts on 2026-08-26 failed exactly that way while every
+// layer we could inspect (login, cart contents, payload) was healthy, and the payload was
+// byte-identical to an order that had placed the day before.
+//
+// The owner found it by hand: THE CART ICON NEVER APPEARS, so the cart cannot be reached through
+// the UI at all, and fetching the checkout URL directly is what triggers the reprice. A normal
+// checkout then went straight through (BLK-1928948). Not a headless quirk — a phone browser
+// behaved identically.
+//
+// place() used to post from whatever page login happened to leave us on, so the cart was never
+// opened. The probe runs that DID open checkout were against a DIFFERENT cart than the one
+// submitted, which is why this hid for a day.
+//
+// It also captures per-line prices, because the reprice is the only moment we can see what
+// Blaklader will really invoice: their cart came to £1,273.79 against our PO net of £1,212.41 for
+// the same 34 lines — £61.38 of stale BP costs that nothing else surfaces.
+async function openCartAndReprice(page, { tries = 6 } = {}) {
+  const passes = [];
+  let settled = null;
+  for (let i = 0; i < tries; i++) {
+    await page.goto(`${config.base}/en/checkout`, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    await dismissConsent(page);
+    await page.waitForTimeout(3000);
+    const seen = await page.evaluate(() => {
+      const txt = (document.body && document.body.innerText || '').replace(/\s+/g, ' ');
+      const money = (t) => { const m = String(t || '').match(/([\d,]+\.\d{2})/); return m ? Number(m[1].replace(/,/g, '')) : null; };
+      const lines = [];
+      for (const row of document.querySelectorAll('tr, li, div')) {
+        const t = (row.innerText || '').replace(/\s+/g, ' ');
+        if (!t || t.length > 400) continue;
+        const art = (t.match(/ARTICLE NUMBER\s*([A-Z0-9/]{6,})/i) || [])[1];
+        if (!art) continue;
+        const price = money((t.match(/[£]\s?([\d,]+\.\d{2})/) || [])[1]);
+        if (price != null && !lines.some((l) => l.sku === art)) lines.push({ sku: art, price });
+      }
+      return {
+        url: location.href,
+        repriced: /updated with the correct pricelist|price might have changed|prices have been (adjusted|updated)/i.test(txt),
+        maintenance: /back shortly|making our website even better/i.test(txt),
+        empty: /your (cart|basket) is empty/i.test(txt),
+        lineCount: lines.length,
+        lines,
+      };
+    }).catch(() => ({}));
+    passes.push({ pass: i + 1, repriced: !!seen.repriced, maintenance: !!seen.maintenance, lineCount: seen.lineCount || 0 });
+    settled = seen;
+    // A reprice means prices JUST changed — read once more so what we capture is the NEW price.
+    if (seen && seen.repriced) { await page.waitForTimeout(2500); continue; }
+    if (seen && !seen.maintenance && seen.lineCount > 0) break;
+    await page.waitForTimeout(2500);
+  }
+  return { passes, cart: settled };
+}
+
 export async function place(page, { ref } = {}) {
   const body = prepared.get(page);
   if (!body) throw new Error('place() called without a staged order body');
@@ -253,6 +314,10 @@ export async function place(page, { ref } = {}) {
     body.metadata.OrderNumber = String(ref);
     if (body.metadata.SalesRef != null) body.metadata.SalesRef = String(ref);
   }
+
+  // MUST happen before the submit — see openCartAndReprice. Failing to open the cart is what made
+  // orders/send return 500 all day on 2026-08-26.
+  const viewed = await openCartAndReprice(page).catch((e) => ({ error: String(e && e.message || e), passes: [], cart: null }));
 
   const out = await page.evaluate(async (payload) => {
     try {
@@ -272,7 +337,12 @@ export async function place(page, { ref } = {}) {
   const placed = !!(out.ok && internalId);
   if (!placed) {
     const detail = (out.json && (out.json.message || (out.json.error && (out.json.error.Message || out.json.error.message)))) || out.text || out.error || '';
-    throw new Error(`orders/send ${out.status}: ${String(detail).slice(0, 400)}`);
+    // Carry what we saw at the cart into the failure. A bare "500 Internal Server Error" with no
+    // context is what made this take a day to find; whether the cart was viewed, whether it
+    // repriced, and how many lines it held are the facts that would have shortened it.
+    const err = new Error(`orders/send ${out.status}: ${String(detail).slice(0, 400)}`);
+    err.cartView = { passes: viewed.passes, repriced: !!(viewed.cart && viewed.cart.repriced), lineCount: (viewed.cart && viewed.cart.lineCount) || 0 };
+    throw err;
   }
   return {
     orderNo: internalId,
@@ -281,6 +351,12 @@ export async function place(page, { ref } = {}) {
     paymentStatus: (out.json && out.json.paymentStatus) || null,
     cartId: (out.json && out.json.cartId) || null,
     status: out.status,
+    // What Blaklader will ACTUALLY invoice, read off the cart after the reprice. The backend can
+    // diff this against the PO's costs — on 2026-08-26 that gap was £61.38 across 34 lines and
+    // nothing else would have shown it.
+    cartViewPasses: viewed.passes,
+    repriced: !!(viewed.cart && viewed.cart.repriced),
+    supplierPrices: (viewed.cart && viewed.cart.lines) || [],
   };
 }
 
