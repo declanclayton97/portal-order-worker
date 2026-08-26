@@ -296,3 +296,49 @@ export async function checkoutProbe(page) {
     cartId: body ? body.cartId : null,
   };
 }
+
+// ── Does the STOREFRONT session actually see our cart? ────────────────────────
+// The cart is built server-side against api.blaklader.com; the worker's browser is a SEPARATE
+// storefront session. If the two are not bound, the header shows NO CART ICON and
+// POST /api/orders/send cannot resolve the cart — which is a naked 500 with the body
+// "Internal Server Error", not a validation error naming a field.
+//
+// Reported by the owner 2026-08-26: opening the cart in a normal browser returned repeated errors,
+// and after several refreshes a notice appeared saying the prices had been adjusted to the correct
+// price list — after which the cart rendered. So the storefront REPRICES on view, and a cart that
+// has never been viewed may be in a state the order endpoint refuses. Their own screenshot of our
+// failing session shows the header with search / location / favourites / flag / MY ACCOUNT and NO
+// cart icon at all.
+//
+// READ-ONLY. Navigates and reads. Never posts orders/send.
+export async function cartProbe(page, { tries = 4 } = {}) {
+  const attempts = [];
+  for (let i = 0; i < tries; i++) {
+    const url = `${config.base}/en/checkout`;
+    let httpStatus = null;
+    const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null);
+    if (resp) httpStatus = resp.status();
+    await dismissConsent(page);
+    await page.waitForTimeout(3000);
+    const seen = await page.evaluate(() => {
+      const txt = (document.body && document.body.innerText || '').replace(/\s+/g, ' ');
+      return {
+        url: location.href,
+        title: document.title,
+        // The reprice notice the owner saw — the thing that made the cart appear.
+        repriced: /price list|prices have been (adjusted|updated)|adjusted to the correct/i.test(txt),
+        errorPage: /internal server error|something went wrong|error 5\d\d|unexpected error/i.test(txt),
+        empty: /your (cart|basket) is empty|no items/i.test(txt),
+        // A cart icon / count in the header is the visible proof the session owns a cart.
+        cartIndicator: !!document.querySelector('[class*="cart" i],[id*="cart" i],[data-testid*="cart" i],a[href*="/cart" i],a[href*="/checkout" i]'),
+        text: txt.slice(0, 1500),
+      };
+    }).catch(() => ({}));
+    attempts.push({ attempt: i + 1, httpStatus, ...seen });
+    // Once it renders a repriced, non-error cart there is nothing to gain from refreshing again.
+    if (seen && !seen.errorPage && (seen.repriced || seen.cartIndicator)) break;
+    await page.waitForTimeout(2500);
+  }
+  const shot = `data:image/png;base64,${(await page.screenshot({ fullPage: false }).catch(() => Buffer.from(''))).toString('base64')}`;
+  return { attempts, finalUrl: page.url(), screenshot: shot };
+}

@@ -51,6 +51,8 @@ async function runOrder({ supplier, ref, lines, opts = {}, execute }) {
     if (opts.ordersList && mod.ordersList) { const ol = await mod.ordersList(page); await browser.close(); return { ok: true, ordersList: true, supplier, ref, ...ol, ms: Date.now() - t0 }; }
     // Ask the portal WHY a line was dropped. Read-only: searches and reads, never touches the
     // basket or the checkout. opts.diagnose = ['<code>', …] (or true, to take them from lines[]).
+    // Read-only: does the storefront session actually see the cart? (Blaklader 500 investigation)
+    if (opts.cartProbe && mod.cartProbe) { const cp = await mod.cartProbe(page, { tries: opts.tries || 4 }); await browser.close(); return { ok: true, cartProbe: true, supplier, ref, ...cp, ms: Date.now() - t0 }; }
     if (opts.diagnose && mod.diagnose) {
       const codes = Array.isArray(opts.diagnose) ? opts.diagnose : lines.map((l) => l.stockCode || l.sku).filter(Boolean);
       const dg = await mod.diagnose(page, { codes, shots: opts.shots == null ? 2 : opts.shots });
