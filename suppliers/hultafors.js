@@ -387,6 +387,25 @@ export async function diagnose(page, { codes = [], shots = 2 } = {}) {
           .map((e) => `${(e.innerText || '').trim().slice(0, 24)} -> ${e.getAttribute('href') || ''}`)
           .filter((s) => s && !s.startsWith(' ->')).slice(0, 25),
       })).catch(() => null);
+      // OPEN THE SEARCH FIRST. The input does not exist until the header control is clicked: it is
+      // an href="#" toggle, and the landing dump proved it — ZERO visible inputs on the page, with
+      // "SEARCH PRODUCT -> #" in the nav. The first version scanned for an input that had not been
+      // rendered yet and reported "no search input found", which reads as "this portal has no
+      // search" when the truth was "I never opened it". Record what was clicked either way.
+      r.searchToggle = await page.evaluate(() => {
+        const el = [...document.querySelectorAll('a, button')].find((e) => {
+          if (e.offsetParent === null) return false;
+          const s = ((e.innerText || '') + ' ' + (e.getAttribute('aria-label') || '')).toLowerCase();
+          return /search/.test(s);
+        });
+        if (!el) return null;
+        if (!el.id) el.id = 'clx-toggle-' + Math.floor(performance.now());
+        return { id: el.id, text: (el.innerText || '').trim().slice(0, 40), href: el.getAttribute('href') || null };
+      }).catch(() => null);
+      if (r.searchToggle) {
+        await page.click('#' + r.searchToggle.id).catch(() => {});
+        await page.waitForTimeout(1000);
+      }
       // Find a search box by SHAPE, not by a memorised selector.
       const box = await page.evaluate(() => {
         const cand = [...document.querySelectorAll('input')].filter((e) => {
@@ -401,7 +420,7 @@ export async function diagnose(page, { codes = [], shots = 2 } = {}) {
       });
       r.searchBox = box;
       if (!box) {
-        r.error = 'no search input found on the landing page';
+        r.error = r.searchToggle ? 'search toggle clicked but no input appeared' : 'no search control found on the landing page';
         // Bring back a picture too — the landing dump above says what is there, the shot says what
         // it looks like, and between them the next version knows where search actually lives.
         if (results.length < shots) r.screenshot = `data:image/png;base64,${(await page.screenshot({ fullPage: false }).catch(() => Buffer.from(''))).toString('base64')}`;
