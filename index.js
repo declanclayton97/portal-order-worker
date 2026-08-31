@@ -69,7 +69,16 @@ async function runOrder({ supplier, ref, lines, opts = {}, execute }) {
     let shot = null;
     try { if (browser) { const p = (await browser.contexts())[0]?.pages()?.[0]; if (p) shot = `data:image/png;base64,${(await p.screenshot()).toString('base64')}`; } } catch {}
     try { if (browser) await browser.close(); } catch {}
-    return { ok: false, supplier, ref, error: e.message, screenshot: shot };
+    // KEEP THE DIAGNOSTIC FIELDS THE THROWER ATTACHED. A supplier module does not just throw a
+    // message: blaklader place() hangs err.cartView on it — whether the cart was opened, whether it
+    // repriced, how many lines it held — precisely because a bare "orders/send 500" cost a full day
+    // on 2026-08-26. Taking only e.message threw that away every time, so the 500 recurred on 08-31
+    // with nothing new recorded and the lead (an empty storefront cart on the checkout screenshot)
+    // had to be found by hand. Copy any own enumerable properties across, without letting them
+    // overwrite ok/error/screenshot.
+    const extra = {};
+    try { for (const k of Object.keys(e || {})) if (!['ok', 'error', 'screenshot', 'supplier', 'ref'].includes(k)) extra[k] = e[k]; } catch {}
+    return { ok: false, supplier, ref, ...extra, error: e.message, screenshot: shot };
   }
 }
 
