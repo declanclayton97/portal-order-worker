@@ -319,6 +319,27 @@ export async function place(page, { ref } = {}) {
   // orders/send return 500 all day on 2026-08-26.
   const viewed = await openCartAndReprice(page).catch((e) => ({ error: String(e && e.message || e), passes: [], cart: null }));
 
+  // REFUSE TO SUBMIT INTO A CART WE READ AS EMPTY. openCartAndReprice exists to get the storefront
+  // session onto the populated basket, but its result was only ever RECORDED — place() submitted no
+  // matter what it saw. So an empty cart produced a bare "orders/send 500" instead of saying why,
+  // which is the failure of 2026-08-26 and again 2026-08-31 (PO 485844). The triage bot's screenshot
+  // of that run shows the checkout page at "TOTAL: £0" with no rows: the browser session was not on
+  // the backend's cart, and we fired anyway.
+  //
+  // Only refuse on POSITIVE evidence of emptiness — we read the cart and it held no lines. If the
+  // read itself failed we know nothing, and blocking on that would turn a flaky read into a missed
+  // order; a failure to look is not a finding. Nothing is lost by refusing here: a submit against an
+  // empty cart has never produced an order, only a 500.
+  const cartRead = viewed && viewed.cart && typeof viewed.cart.lineCount === 'number';
+  if (cartRead && viewed.cart.lineCount === 0) {
+    const err = new Error(`storefront cart is EMPTY after ${(viewed.passes || []).length} pass(es) — not submitting. `
+      + `The browser session is not on the backend's cart (cartId is passed in the body), so orders/send would 500. `
+      + `${viewed.cart.empty ? 'The page says the basket is empty. ' : ''}${viewed.cart.maintenance ? 'The site was showing a maintenance notice. ' : ''}`);
+    err.cartView = { passes: viewed.passes, repriced: !!viewed.cart.repriced, lineCount: 0, url: viewed.cart.url || null, empty: !!viewed.cart.empty, maintenance: !!viewed.cart.maintenance };
+    err.refusedEmptyCart = true;
+    throw err;
+  }
+
   const out = await page.evaluate(async (payload) => {
     try {
       const r = await fetch('/api/orders/send', {
