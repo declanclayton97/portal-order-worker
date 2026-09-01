@@ -446,6 +446,40 @@ export async function diagnose(page, { codes = [], shots = 2 } = {}) {
         minOrderHint: (t.match(/min(?:imum)?\s*(?:order)?\s*(?:qty|quantity)\D{0,12}(\d{1,4})/i) || [])[1] || null,
         outOfStock: /out of stock|no stock|slut i lager|not in stock/i.test(t),
       };
+      // MATRIX VIEW. The product page carries one price and NO per-variant stock, which is why it
+      // could not explain 28500400006: the style is live, not discontinued, not out of stock, and
+      // Hultafors still drop that one code from the CSV import in silence. The grid behind "Switch
+      // to matrix view" is where colour x size, the real article numbers and the per-variant
+      // quantities live, so it is the only page that can say what 0400/006 actually IS on their side.
+      //
+      // Also worth remembering why the product page misled: its "Net price:" is EMPTY until a colour
+      // and size are chosen. That was read as "no price on our account, cannot buy it" on 2026-08-28
+      // and it was simply an unselected form.
+      r.matrix = await (async () => {
+        const tog = await page.evaluate(() => {
+          const el = [...document.querySelectorAll('a,button,span,div')]
+            .find((e) => e.offsetParent !== null && /matrix view/i.test(e.innerText || ''));
+          if (!el) return null;
+          if (!el.id) el.id = 'clx-matrix-' + Math.floor(performance.now());
+          return { id: el.id, text: (el.innerText || '').trim().slice(0, 40) };
+        }).catch(() => null);
+        if (!tog) return { toggle: null, note: 'no matrix-view control on this page' };
+        await page.click('#' + tog.id).catch(() => {});
+        await page.waitForTimeout(2500);
+        const grid = await page.evaluate(() => {
+          const txt = (document.body && document.body.innerText || '').replace(/\s+/g, ' ');
+          // Article numbers on this portal are 11 digits: style(4) + colour(4) + size(3).
+          const articles = [...new Set(txt.match(/\b\d{11}\b/g) || [])].slice(0, 80);
+          // Quantity boxes usually carry the orderable ceiling, which is the stock figure we want.
+          const cells = [...document.querySelectorAll('input')]
+            .filter((e) => e.offsetParent !== null && e.type !== 'hidden')
+            .map((e) => ({ name: e.name || null, id: e.id || null, max: e.max || null,
+              title: e.getAttribute('title') || null, article: e.getAttribute('data-article') || e.getAttribute('data-articleno') || null }))
+            .slice(0, 60);
+          return { articles, cells, text: txt.slice(0, 2500) };
+        }).catch(() => null);
+        return { toggle: tog, ...(grid || { note: 'matrix opened but could not be read' }) };
+      })();
       if (results.length < shots) {
         r.screenshot = `data:image/png;base64,${(await page.screenshot({ fullPage: false }).catch(() => Buffer.from(''))).toString('base64')}`;
       }
