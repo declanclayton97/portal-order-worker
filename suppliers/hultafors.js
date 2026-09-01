@@ -457,8 +457,12 @@ export async function diagnose(page, { codes = [], shots = 2 } = {}) {
       // and it was simply an unselected form.
       r.matrix = await (async () => {
         const tog = await page.evaluate(() => {
-          const el = [...document.querySelectorAll('a,button,span,div')]
-            .find((e) => e.offsetParent !== null && /matrix view/i.test(e.innerText || ''));
+          // Match the INNERMOST element. innerText bubbles: the page wrapper contains the string
+          // "Switch to matrix view" too, so a plain .find() picked the header div and clicked it.
+          const hits = [...document.querySelectorAll('a,button,span,div')]
+            .filter((e) => e.offsetParent !== null && /switch to matrix view/i.test(e.innerText || ''))
+            .sort((a, b) => (a.innerText || '').trim().length - (b.innerText || '').trim().length);
+          const el = hits[0];
           if (!el) return null;
           if (!el.id) el.id = 'clx-matrix-' + Math.floor(performance.now());
           return { id: el.id, text: (el.innerText || '').trim().slice(0, 40) };
