@@ -244,16 +244,36 @@ export async function place(page, { ref } = {}) {
   return { placed, orderNo, url: page.url(), total: totalBefore, screenshot };
 }
 
-// Read-only: what does the grid actually offer for these variations? For working out why a line
-// will not stage without touching the basket.
+// Read-only: what does the site return for a search term? For working out why a line will not
+// resolve, without touching the basket.
+//
+// Uses the site's OWN search API (/wp-json/ysm/v1/search) — the same one the backend resolver
+// uses — rather than scraping the results page. The first version of this scraped
+// a.woocommerce-LoopProduct-link and returned zero hits for EVERYTHING, including PB271 and
+// "Brandon", products we had staged into a basket minutes earlier. On this Elementor build those
+// selectors match nothing, so it reported "not found" for things that plainly exist. A probe that
+// cannot tell absent from unmatched is worse than no probe: it makes a live product look
+// discontinued.
+//
+// The search itself is not trustworthy for VARIATIONS — asked for "PB56C-BRN-10.5" it returns a
+// suggestion captioned "…- 10.5" whether or not that size exists, because it decorates the caption
+// from the query. It is reliable only for finding a product PAGE, which is all this reports.
 export async function diagnose(page, { codes = [] } = {}) {
   const out = [];
   for (const c of codes.slice(0, 10)) {
     try {
-      await page.goto(`${BASE}/?s=${encodeURIComponent(c)}&post_type=product`, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      const hits = await page.evaluate(() => [...document.querySelectorAll('a.woocommerce-LoopProduct-link, h2.woocommerce-loop-product__title')]
-        .map((a) => (a.href || a.innerText || '').trim()).filter(Boolean).slice(0, 5));
-      out.push({ code: c, hits });
+      const j = await page.evaluate(async (q) => {
+        const r = await fetch(`/wp-json/ysm/v1/search?id=1&query=${encodeURIComponent(q)}`, { credentials: 'include' });
+        if (!r.ok) return { status: r.status, suggestions: [] };
+        const body = await r.json().catch(() => ({}));
+        return { status: r.status, suggestions: body.suggestions || [] };
+      }, c);
+      const hits = (j.suggestions || []).map((s) => {
+        const href = (/href="([^"]+)"/.exec(s.data || '') || [])[1] || null;
+        const label = String(s.value || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        return { label: label.slice(0, 90), url: href ? href.split('?')[0] : null };
+      }).slice(0, 6);
+      out.push({ code: c, status: j.status, hits });
     } catch (e) { out.push({ code: c, error: e.message }); }
   }
   return { searched: out };
