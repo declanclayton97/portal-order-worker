@@ -197,6 +197,21 @@ export async function place(page, { ref } = {}) {
   }
   await po.fill(String(ref));
 
+  // Their checkout carries a terms-and-conditions checkbox and refuses without it:
+  // "Please read and accept the terms and conditions to proceed with your order." Ticking it is
+  // part of placing the trade order that was asked for — the same box a buyer ticks by hand — and
+  // it is checked for explicitly rather than blind-clicked, so if the box ever moves this fails
+  // loudly instead of placing an order that skipped it.
+  const terms = await page.$('input#terms, input[name="terms"]');
+  if (terms) {
+    await terms.check().catch(async () => { await terms.click().catch(() => {}); });
+    const ticked = await page.evaluate(() => {
+      const t = document.querySelector('input#terms, input[name="terms"]');
+      return !!t && t.checked;
+    });
+    if (!ticked) throw new Error('could not tick the terms checkbox — refusing to attempt the order');
+  }
+
   const totalBefore = await page.evaluate(() => {
     const el = document.querySelector('.order-total .amount, .order-total bdi');
     const m = el && el.innerText.match(/([\d,]+\.\d{2})/);
