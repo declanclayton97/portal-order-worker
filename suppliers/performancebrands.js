@@ -120,8 +120,26 @@ export async function stage(page, { lines = [] } = {}) {
         const box = await page.$(sel);
         if (!box) { results.push({ sku: l.sku, pid: l.pid, ok: false, reason: 'no quantity box for that variation on the page' }); continue; }
         const max = Number(await box.getAttribute('max_qty')) || Number(await box.getAttribute('max')) || null;
+        const min = Number(await box.getAttribute('min_qty')) || Number(await box.getAttribute('min')) || null;
+        const step = Number(await box.getAttribute('step')) || null;
         if (max != null && Number(l.qty) > max) {
           results.push({ sku: l.sku, pid: l.pid, ok: false, reason: `only ${max} available, need ${l.qty}` });
+          continue;
+        }
+        // Some products carry a MINIMUM order quantity and a step, and the grid enforces both by
+        // simply leaving the Add button disabled — no message, no error. The Y-Shield OR7 helmet
+        // (BP 191339) is min 20, step 20 at £5.38, so the 2 that low-inventory keeps asking for
+        // can never be bought however the request is shaped. Say that plainly here instead of
+        // reporting the symptom ("Add button never enabled"), which sends whoever reads it looking
+        // for a fault that is really a supplier term.
+        if (min != null && Number(l.qty) < min) {
+          results.push({ sku: l.sku, pid: l.pid, ok: false, minQty: min, step,
+            reason: `supplier minimum is ${min}${step && step > 1 ? ` (in steps of ${step})` : ''}, this line wants ${l.qty}` });
+          continue;
+        }
+        if (step && step > 1 && Number(l.qty) % step !== 0) {
+          results.push({ sku: l.sku, pid: l.pid, ok: false, step,
+            reason: `must be ordered in steps of ${step}, this line wants ${l.qty}` });
           continue;
         }
         await box.fill(String(l.qty));
