@@ -340,19 +340,52 @@ export async function place(page, { ref } = {}) {
     throw err;
   }
 
-  const out = await page.evaluate(async (payload) => {
+  // THE SUBMIT NEEDS A DEADLINE. This fetch had none, so when Blaklader accepted the order but
+  // never answered, the evaluate simply waited — until the worker's own 25-minute job ceiling killed
+  // the whole run. That is the "hang" seen on 27 and 31 Aug, 1 Sept and 3 Sept: every time the order
+  // WAS created at their end (BLK-1929470, BLK-1932804, BLK-1933950, BLK-1937180) and every time we
+  // sat there for 25 minutes waiting for a reply that never came, then recovered it afterwards by
+  // reading their order list.
+  //
+  // Two costs to that. The lock is held for 25 minutes and swallows the next supplier's window —
+  // Snickers' 10:00 slot was lost to it on 2 Sept. And for those 25 minutes a live order exists at
+  // Blaklader that Brightpearl knows nothing about.
+  //
+  // A deadline cannot make the response arrive, but it turns a 25-minute hang into a ~5-minute
+  // ambiguous answer, which is exactly what the backend's read-back already handles: it asks
+  // Blaklader what they actually have and marks the PO placed from THEIR record. Same outcome,
+  // twenty minutes earlier, and the next window survives.
+  const SUBMIT_TIMEOUT_MS = Number(process.env.BLAKLADER_SUBMIT_TIMEOUT_MS || 300000);
+  const out = await page.evaluate(async ({ payload, timeoutMs }) => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const r = await fetch('/api/orders/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify(payload),
         credentials: 'same-origin',      // Blk._Auth rides along; that is the whole trick
+        signal: ctrl.signal,
       });
       const text = await r.text();
       let json = null; try { json = JSON.parse(text); } catch { /* keep the text */ }
       return { status: r.status, ok: r.ok, json, text: text.slice(0, 1000) };
-    } catch (e) { return { status: 0, ok: false, error: String(e && e.message || e) }; }
-  }, body);
+    } catch (e) {
+      const aborted = !!(e && (e.name === 'AbortError' || /abort/i.test(String(e.message || ''))));
+      return { status: 0, ok: false, timedOut: aborted, error: String((e && e.message) || e) };
+    } finally { clearTimeout(timer); }
+  }, { payload: body, timeoutMs: SUBMIT_TIMEOUT_MS });
+
+  // A submit that never answered is NOT a failed order. The request reached Blaklader and may well
+  // have created one — every previous instance of this did. Say so explicitly so the backend asks
+  // their order list instead of assuming either way, and never retries on the strength of it.
+  if (out.timedOut) {
+    const err = new Error(`orders/send did not answer within ${Math.round(SUBMIT_TIMEOUT_MS / 1000)}s — `
+      + `the order MAY have been created at Blaklader. Do not re-run: check their order list for this PO.`);
+    err.submitTimedOut = true;
+    err.cartView = { passes: viewed.passes, repriced: !!(viewed.cart && viewed.cart.repriced), lineCount: (viewed.cart && viewed.cart.lineCount) || 0 };
+    throw err;
+  }
 
   const internalId = (out.json && (out.json.internalOrderId || out.json.internalId)) || null;
   const placed = !!(out.ok && internalId);
