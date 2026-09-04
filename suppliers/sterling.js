@@ -40,9 +40,22 @@ export async function login(page, { user, pass }) {
 // Derive a good search term from the resolved style name: drop a leading/trailing colour
 // word and trailing size digits, so "Brown Challenger 3" -> "Challenger", "APKHTBlack" ->
 // "APKHT". Falls back to the whole string.
+const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function searchTerm(search, colour) {
   let s = String(search || '').trim();
-  if (colour) { const c = String(colour).split('/')[0]; s = s.replace(new RegExp(`\\b${c}\\b`, 'ig'), '').trim(); s = s.replace(new RegExp(c, 'ig'), '').trim(); }
+  if (colour) {
+    // EVERY colour token, not just the first. This took `String(colour).split('/')[0]`, so a
+    // compound colour dropped only its first word and left the rest — including the slash — in the
+    // search: "Sudbury Grey/Black" in Grey/Black became "Sudbury /Black", which matches nothing on
+    // the portal. One dead line is enough to refuse a whole order, and on 2026-09-04 it did:
+    // 9 of 10 lines added, "not ready to place", nothing bought.
+    for (const c of String(colour).split(/[/,&]/).map((x) => x.trim()).filter(Boolean)) {
+      s = s.replace(new RegExp(`\\b${escapeRe(c)}\\b`, 'ig'), ' ');
+      s = s.replace(new RegExp(escapeRe(c), 'ig'), ' ');
+    }
+    // tidy up separators the colour left behind, or "Sudbury /Black" simply becomes "Sudbury /"
+    s = s.replace(/[/,&]+/g, ' ').replace(/\s+/g, ' ').trim();
+  }
   s = s.replace(/\b\d+\b\s*$/,'').trim();          // trailing size number
   return s || String(search || '').trim();
 }
