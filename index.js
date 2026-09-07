@@ -95,6 +95,12 @@ async function runOrderInner({ supplier, ref, lines, opts = {}, execute }) {
   const pass = process.env[mod.config.envPass];
   if (!user || !pass) return { ok: false, supplier, ref, error: `${mod.config.envUser}/${mod.config.envPass} not set` };
 
+  // KEEP THE STAGING VERDICT FOR THE ERROR PATH. staged was only ever spread into the success and
+  // dry-run returns, so when place() threw, everything stage() had established went with it —
+  // cartMatches, browserCartId, hasStorefrontAuth. On 2026-09-07 Blaklader refused to submit with
+  // "the browser session is not on the backend's cart", and that claim could not be checked against
+  // anything, because the one function that measures it had already discarded its answer.
+  let lastStaged = null;
   let browser; const t0 = Date.now();
   try {
     browser = await launch();
@@ -114,6 +120,7 @@ async function runOrderInner({ supplier, ref, lines, opts = {}, execute }) {
       return { ok: true, diagnose: true, supplier, ref, ...dg, ms: Date.now() - t0 };
     }
     const staged = await mod.stage(page, { lines, creds: { user, pass }, ...opts });
+    lastStaged = staged;
     if (!execute) { await closeQuietly(browser); return { ok: true, dryRun: true, supplier, ref, ...staged, ms: Date.now() - t0 }; }
     if (!staged.ready) { await closeQuietly(browser); return { ok: false, error: 'not ready to place', supplier, ref, ...staged }; }
     const placed = await mod.place(page, { ref });
@@ -132,7 +139,10 @@ async function runOrderInner({ supplier, ref, lines, opts = {}, execute }) {
     // overwrite ok/error/screenshot.
     const extra = {};
     try { for (const k of Object.keys(e || {})) if (!['ok', 'error', 'screenshot', 'supplier', 'ref'].includes(k)) extra[k] = e[k]; } catch {}
-    return { ok: false, supplier, ref, ...extra, error: e.message, screenshot: shot };
+    const stagedInfo = lastStaged
+      ? { cartMatches: lastStaged.cartMatches, browserCartId: lastStaged.browserCartId, cartId: lastStaged.cartId, hasStorefrontAuth: lastStaged.hasStorefrontAuth, stageNote: lastStaged.note, stagedLines: lastStaged.cartCount, stagedUnits: lastStaged.units }
+      : null;
+    return { ok: false, supplier, ref, ...extra, staged: stagedInfo, error: e.message, screenshot: shot };
   }
 }
 

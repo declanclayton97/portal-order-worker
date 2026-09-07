@@ -294,13 +294,23 @@ async function openCartAndReprice(page, { tries = 6 } = {}) {
         empty: /your (cart|basket) is empty/i.test(txt),
         lineCount: lines.length,
         lines,
+        // TWO INDEPENDENT WITNESSES, because lineCount alone cannot tell "the cart is empty" from
+        // "my parser stopped matching". The structured parse above needs the ARTICLE NUMBER label,
+        // a £ price AND the whole element under 400 chars, all in one node — so a row that merely
+        // grew past 400 chars, or moved its price into a sibling, reads as an empty cart.
+        // These two make no assumption about row structure at all.
+        articleMentions: (txt.match(/ARTICLE NUMBER/gi) || []).length,
+        cartTotal: (txt.match(/(?:total|sum)[^£]{0,40}£\s?([\d,]+\.\d{2})/i) || [])[1] || null,
+        bodyChars: txt.length,
       };
     }).catch(() => ({}));
-    passes.push({ pass: i + 1, repriced: !!seen.repriced, maintenance: !!seen.maintenance, lineCount: seen.lineCount || 0 });
+    passes.push({ pass: i + 1, repriced: !!seen.repriced, maintenance: !!seen.maintenance, lineCount: seen.lineCount || 0, articleMentions: seen.articleMentions || 0 });
     settled = seen;
     // A reprice means prices JUST changed — read once more so what we capture is the NEW price.
     if (seen && seen.repriced) { await page.waitForTimeout(2500); continue; }
-    if (seen && !seen.maintenance && seen.lineCount > 0) break;
+    // Stop once the cart is visibly populated by EITHER witness. Waiting for the structured parse
+    // alone meant a parser miss burned all six passes and still concluded "empty".
+    if (seen && !seen.maintenance && (seen.lineCount > 0 || seen.articleMentions > 0)) break;
     await page.waitForTimeout(2500);
   }
   return { passes, cart: settled };
@@ -330,15 +340,40 @@ export async function place(page, { ref } = {}) {
   // read itself failed we know nothing, and blocking on that would turn a flaky read into a missed
   // order; a failure to look is not a finding. Nothing is lost by refusing here: a submit against an
   // empty cart has never produced an order, only a 500.
+  // WHAT COUNTS AS "EMPTY" — the distinction that cost 2026-09-07's order (PO 487374, £2,936.72).
+  //
+  // This guard used to refuse whenever lineCount === 0, which reads a PARSER MISS as an empty cart.
+  // That is the exact conflation the comment above warns against: the structured parse needs the
+  // ARTICLE NUMBER label, a £ price and a sub-400-character element all in one node, so any change
+  // to their row markup turns a full basket into "empty". On 2026-09-07 all six passes returned
+  // lineCount 0 with empty:false while Blaklader's own API held 63 lines / 90 units — a real order
+  // refused on the strength of a scrape.
+  //
+  // So: refuse only on POSITIVE evidence, meaning the page SAYS the basket is empty. A page we
+  // could not parse is an unreliable read, not a finding, and it must not block. The asymmetry is
+  // the whole argument — the backend verifies the API cart before the worker is ever called, and
+  // stage() has already confirmed the session owns that cart (cartMatches) or holds no cart cookie
+  // at all, in which case the submit goes by cartId in the body. Submitting into a genuinely empty
+  // cart costs one 500 and an error log with full context; refusing a good cart costs the order,
+  // every single day, silently. We take the 500.
   const cartRead = viewed && viewed.cart && typeof viewed.cart.lineCount === 'number';
-  if (cartRead && viewed.cart.lineCount === 0) {
+  const witnesses = viewed && viewed.cart
+    ? { lineCount: viewed.cart.lineCount || 0, articleMentions: viewed.cart.articleMentions || 0, cartTotal: viewed.cart.cartTotal || null }
+    : null;
+  const looksPopulated = !!(witnesses && (witnesses.lineCount > 0 || witnesses.articleMentions > 0 || Number(String(witnesses.cartTotal || '0').replace(/,/g, '')) > 0));
+  if (cartRead && !looksPopulated && viewed.cart.empty) {
     const err = new Error(`storefront cart is EMPTY after ${(viewed.passes || []).length} pass(es) — not submitting. `
-      + `The browser session is not on the backend's cart (cartId is passed in the body), so orders/send would 500. `
-      + `${viewed.cart.empty ? 'The page says the basket is empty. ' : ''}${viewed.cart.maintenance ? 'The site was showing a maintenance notice. ' : ''}`);
-    err.cartView = { passes: viewed.passes, repriced: !!viewed.cart.repriced, lineCount: 0, url: viewed.cart.url || null, empty: !!viewed.cart.empty, maintenance: !!viewed.cart.maintenance };
+      + `The page states the basket is empty and no article rows, article labels or cart total were found, `
+      + `so orders/send would 500. ${viewed.cart.maintenance ? 'The site was also showing a maintenance notice. ' : ''}`);
+    err.cartView = { passes: viewed.passes, repriced: !!viewed.cart.repriced, lineCount: 0, url: viewed.cart.url || null, empty: true, maintenance: !!viewed.cart.maintenance, witnesses };
     err.refusedEmptyCart = true;
     throw err;
   }
+  // Unparseable but not declared empty: proceed, and make sure the run says so out loud whatever
+  // the outcome. This is the state that used to abort — if it turns out to be a genuine empty cart
+  // the submit below will 500 and carry this flag with it, which distinguishes the two cases for
+  // real instead of by assumption.
+  const cartUnreadable = !!(cartRead && !looksPopulated && !viewed.cart.empty);
 
   // THE SUBMIT NEEDS A DEADLINE. This fetch had none, so when Blaklader accepted the order but
   // never answered, the evaluate simply waited — until the worker's own 25-minute job ceiling killed
@@ -383,7 +418,7 @@ export async function place(page, { ref } = {}) {
     const err = new Error(`orders/send did not answer within ${Math.round(SUBMIT_TIMEOUT_MS / 1000)}s — `
       + `the order MAY have been created at Blaklader. Do not re-run: check their order list for this PO.`);
     err.submitTimedOut = true;
-    err.cartView = { passes: viewed.passes, repriced: !!(viewed.cart && viewed.cart.repriced), lineCount: (viewed.cart && viewed.cart.lineCount) || 0 };
+    err.cartView = { passes: viewed.passes, repriced: !!(viewed.cart && viewed.cart.repriced), lineCount: (viewed.cart && viewed.cart.lineCount) || 0, cartUnreadable, witnesses };
     throw err;
   }
 
@@ -395,7 +430,7 @@ export async function place(page, { ref } = {}) {
     // context is what made this take a day to find; whether the cart was viewed, whether it
     // repriced, and how many lines it held are the facts that would have shortened it.
     const err = new Error(`orders/send ${out.status}: ${String(detail).slice(0, 400)}`);
-    err.cartView = { passes: viewed.passes, repriced: !!(viewed.cart && viewed.cart.repriced), lineCount: (viewed.cart && viewed.cart.lineCount) || 0 };
+    err.cartView = { passes: viewed.passes, repriced: !!(viewed.cart && viewed.cart.repriced), lineCount: (viewed.cart && viewed.cart.lineCount) || 0, cartUnreadable, witnesses };
     throw err;
   }
   return {
@@ -411,6 +446,11 @@ export async function place(page, { ref } = {}) {
     cartViewPasses: viewed.passes,
     repriced: !!(viewed.cart && viewed.cart.repriced),
     supplierPrices: (viewed.cart && viewed.cart.lines) || [],
+    // A placed order whose cart we could not read is worth surfacing even on success: the order is
+    // fine, but supplierPrices will be empty, so the price-gap check silently had nothing to compare
+    // and the row markup probably needs the parser updating.
+    cartUnreadable,
+    witnesses,
   };
 }
 
@@ -462,7 +502,10 @@ export async function cartProbe(page, { tries = 4 } = {}) {
         // A cart icon / count in the header is the visible proof the session owns a cart.
         cartIndicator: !!document.querySelector('[class*="cart" i],[id*="cart" i],[data-testid*="cart" i],a[href*="/cart" i],a[href*="/checkout" i]'),
         // The cart total, so a reprice is visible as a NUMBER even if the wording changes.
-        cartTotal: (txt.match(/£s?([d,]+.d{2})/) || [])[1] || null,
+        cartTotal: (txt.match(/£\s?([\d,]+\.\d{2})/) || [])[1] || null,
+        // Markup-independent proof the cart has rows: count the label itself across the whole
+        // body, with no assumption about how rows are nested or where the price sits.
+        articleMentions: (txt.match(/ARTICLE NUMBER/gi) || []).length,
         text: txt.slice(0, 1500),
       };
     }).catch(() => ({}));
