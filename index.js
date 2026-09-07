@@ -33,8 +33,62 @@ async function launch() {
   return chromium.launch({ headless: HEADLESS, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] });
 }
 
+// CLOSING THE BROWSER CAN HANG, AND IT TOOK THE ERROR WITH IT.
+// browser.close() accepts no timeout, and Chromium will not exit while a renderer still holds an
+// in-flight request — which is exactly the state after an aborted submit. `catch {}` catches a
+// rejection, never a hang.
+//
+// Blaklader, 2026-09-04: the submit deadline fired correctly at 5 minutes and place() threw
+// "orders/send did not answer" — then teardown hung and the result never came back. The backend
+// gave up at its own 25-minute ceiling and logged ITS message, not the worker's, which is how we
+// know the error was produced and lost rather than never raised. The order (BLK-1938749) existed at
+// Blaklader the whole time. Same shape on 27 and 31 Aug and 1 and 3 Sept.
+//
+// A browser we cannot close is not worth a run: return the answer and let the process linger.
+async function closeQuietly(browser, ms = 15000) {
+  if (!browser) return { closed: true };
+  let timer;
+  try {
+    const raced = await Promise.race([
+      browser.close().then(() => 'closed'),
+      new Promise((r) => { timer = setTimeout(() => r('timeout'), ms); }),
+    ]);
+    if (raced === 'timeout') console.error(`[worker] browser.close() still hanging after ${ms}ms — abandoning it and returning anyway`);
+    return { closed: raced === 'closed' };
+  } catch (e) { return { closed: false, error: String(e && e.message || e) }; }
+  finally { clearTimeout(timer); }
+}
+
+// A CEILING ON THE WHOLE RUN, not just on the parts we already knew could hang.
+// The backend gives up at 25 minutes; this worker had no limit of its own, so a hang anywhere
+// meant the backend logged its own "job timed out" while the real reason — already computed,
+// already attached to an error — sat here and never came back. Bounding browser.close() fixes the
+// case we found; this bounds the ones we have not.
+//
+// It cannot stop the work, only stop waiting for it. So the result says plainly that an order MAY
+// exist, which is the same thing the submit deadline says and what the backend's read-back is
+// built to resolve. Never "failed": a run we stopped watching is not a run that did not place.
+const JOB_CEILING_MS = Number(process.env.WORKER_JOB_CEILING_MS || 20 * 60 * 1000);
+async function runOrder(args) {
+  let timer;
+  const started = Date.now();
+  try {
+    return await Promise.race([
+      runOrderInner(args),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve({
+          ok: false, supplier: args.supplier, ref: args.ref, jobCeilingHit: true,
+          error: `worker abandoned this run after ${Math.round(JOB_CEILING_MS / 60000)} min — an order MAY have been placed. `
+            + `CHECK THE SUPPLIER'S OWN ORDER LIST before retrying; a retry can order it twice.`,
+          ms: Date.now() - started,
+        }), JOB_CEILING_MS);
+      }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
 // The core order flow. NEVER throws — always resolves to a result object.
-async function runOrder({ supplier, ref, lines, opts = {}, execute }) {
+async function runOrderInner({ supplier, ref, lines, opts = {}, execute }) {
   const mod = await loadSupplier(supplier);
   if (!mod) return { ok: false, supplier, ref, error: `no automation module for supplier "${supplier}"` };
   const user = process.env[mod.config.envUser];
@@ -46,29 +100,29 @@ async function runOrder({ supplier, ref, lines, opts = {}, execute }) {
     browser = await launch();
     const page = await (await browser.newContext()).newPage();
     await mod.login(page, { user, pass });
-    if (opts.inspect && mod.inspect) { const insp = await mod.inspect(page, { lines, creds: { user, pass } }); await browser.close(); return { ok: true, inspect: true, supplier, ref, ...insp, ms: Date.now() - t0 }; }
-    if (opts.checkoutProbe && mod.checkoutProbe) { const staged = await mod.stage(page, { lines, creds: { user, pass }, ...opts }); const probe = await mod.checkoutProbe(page); await browser.close(); return { ok: true, checkoutProbe: true, supplier, ref, staged: { added: staged.added, cart: staged.cartCount, units: staged.units, ready: staged.ready }, ...probe, ms: Date.now() - t0 }; }
-    if (opts.ordersList && mod.ordersList) { const ol = await mod.ordersList(page); await browser.close(); return { ok: true, ordersList: true, supplier, ref, ...ol, ms: Date.now() - t0 }; }
+    if (opts.inspect && mod.inspect) { const insp = await mod.inspect(page, { lines, creds: { user, pass } }); await closeQuietly(browser); return { ok: true, inspect: true, supplier, ref, ...insp, ms: Date.now() - t0 }; }
+    if (opts.checkoutProbe && mod.checkoutProbe) { const staged = await mod.stage(page, { lines, creds: { user, pass }, ...opts }); const probe = await mod.checkoutProbe(page); await closeQuietly(browser); return { ok: true, checkoutProbe: true, supplier, ref, staged: { added: staged.added, cart: staged.cartCount, units: staged.units, ready: staged.ready }, ...probe, ms: Date.now() - t0 }; }
+    if (opts.ordersList && mod.ordersList) { const ol = await mod.ordersList(page); await closeQuietly(browser); return { ok: true, ordersList: true, supplier, ref, ...ol, ms: Date.now() - t0 }; }
     // Ask the portal WHY a line was dropped. Read-only: searches and reads, never touches the
     // basket or the checkout. opts.diagnose = ['<code>', …] (or true, to take them from lines[]).
     // Read-only: does the storefront session actually see the cart? (Blaklader 500 investigation)
-    if (opts.cartProbe && mod.cartProbe) { const cp = await mod.cartProbe(page, { tries: opts.tries || 4 }); await browser.close(); return { ok: true, cartProbe: true, supplier, ref, ...cp, ms: Date.now() - t0 }; }
+    if (opts.cartProbe && mod.cartProbe) { const cp = await mod.cartProbe(page, { tries: opts.tries || 4 }); await closeQuietly(browser); return { ok: true, cartProbe: true, supplier, ref, ...cp, ms: Date.now() - t0 }; }
     if (opts.diagnose && mod.diagnose) {
       const codes = Array.isArray(opts.diagnose) ? opts.diagnose : lines.map((l) => l.stockCode || l.sku).filter(Boolean);
       const dg = await mod.diagnose(page, { codes, shots: opts.shots == null ? 2 : opts.shots });
-      await browser.close();
+      await closeQuietly(browser);
       return { ok: true, diagnose: true, supplier, ref, ...dg, ms: Date.now() - t0 };
     }
     const staged = await mod.stage(page, { lines, creds: { user, pass }, ...opts });
-    if (!execute) { await browser.close(); return { ok: true, dryRun: true, supplier, ref, ...staged, ms: Date.now() - t0 }; }
-    if (!staged.ready) { await browser.close(); return { ok: false, error: 'not ready to place', supplier, ref, ...staged }; }
+    if (!execute) { await closeQuietly(browser); return { ok: true, dryRun: true, supplier, ref, ...staged, ms: Date.now() - t0 }; }
+    if (!staged.ready) { await closeQuietly(browser); return { ok: false, error: 'not ready to place', supplier, ref, ...staged }; }
     const placed = await mod.place(page, { ref });
-    await browser.close();
+    await closeQuietly(browser);
     return { ok: true, supplier, ref, ...staged, ...placed, ms: Date.now() - t0 };
   } catch (e) {
     let shot = null;
     try { if (browser) { const p = (await browser.contexts())[0]?.pages()?.[0]; if (p) shot = `data:image/png;base64,${(await p.screenshot()).toString('base64')}`; } } catch {}
-    try { if (browser) await browser.close(); } catch {}
+    await closeQuietly(browser);
     // KEEP THE DIAGNOSTIC FIELDS THE THROWER ATTACHED. A supplier module does not just throw a
     // message: blaklader place() hangs err.cartView on it — whether the cart was opened, whether it
     // repriced, how many lines it held — precisely because a bare "orders/send 500" cost a full day
