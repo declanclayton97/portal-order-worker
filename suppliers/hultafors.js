@@ -329,6 +329,48 @@ export async function checkoutProbe(page, { ref } = {}) {
   return { cart, trail: w.trail, poSet: w.poRes, atConfirm: w.atConfirm, summary, screenshot };
 }
 
+// Read the account's order list. READ-ONLY: it navigates and scrapes, and never touches the basket
+// or the checkout — index.js dispatches it before stage() for exactly that reason.
+//
+// This is the answer to "did it actually place?", which until now had none. Snickers is an
+// `unreadable` supplier, so when place() clicks Confirm and no confirmation appears, nothing
+// downstream can ask the portal — and a blind re-run buys the order twice. On 2026-09-11 PO 488518
+// (84 units, £3k) sat in exactly that state and the only way to resolve it was a person logging in
+// by hand. Hultafors move a processed order to CLOSED, so the order list is the authority.
+//
+// The URL is NOT hardcoded: it is found by following the portal's own navigation, because a guessed
+// path that 404s would scrape an error page and report "no orders" — which reads exactly like "not
+// placed" and is the most dangerous wrong answer this function could give. If the list cannot be
+// read, that is reported as found:false WITH the links it saw and a screenshot; the caller must
+// treat that as UNKNOWN, never as proof of anything.
+export async function ordersList(page, { match = null } = {}) {
+  const tried = [];
+  const navLinks = await page.evaluate(() => [...document.querySelectorAll('a[href]')]
+    .map((a) => ({ href: a.getAttribute('href') || '', txt: (a.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 40) }))
+    .filter((l) => /order/i.test(l.txt) || /order/i.test(l.href))
+    .filter((l) => !/basket|cart|checkout|placeorder|forceorder/i.test(l.href))
+    .slice(0, 12)).catch(() => []);
+  // The portal's own "orders" links first; the documented history paths only as a fallback.
+  const candidates = [...new Set([...navLinks.map((l) => l.href), '/en/Order/Orders', '/en/Orders', '/en/Order/History'])];
+  let rows = [], ordersUrl = null;
+  for (const href of candidates) {
+    if (!href || /^javascript:/i.test(href)) continue;
+    const url = href.startsWith('http') ? href : `${config.base}${href.startsWith('/') ? '' : '/'}${href}`;
+    tried.push(url);
+    await page.goto(url, { waitUntil: 'domcontentloaded' }).catch(() => {});
+    await page.waitForTimeout(2500);
+    const found = await page.evaluate(() => [...document.querySelectorAll('tr')]
+      .map((tr) => tr.innerText.replace(/\s+/g, ' ').trim())
+      .filter((t) => t && t.length < 300).slice(0, 80)).catch(() => []);
+    // A real order table has several rows and at least one that looks like an order line. One
+    // stray <tr> on a menu page is not an order list, and must not be reported as an empty one.
+    if (found.length >= 2 && found.some((t) => /\d{4,}/.test(t))) { rows = found; ordersUrl = page.url(); break; }
+  }
+  const hit = match ? rows.filter((r) => r.includes(String(match))) : [];
+  const screenshot = rows.length ? null : `data:image/png;base64,${(await page.screenshot({ fullPage: true }).catch(() => Buffer.from(''))).toString('base64')}`;
+  return { found: rows.length > 0, ordersUrl, rows, tried, navLinks, ...(match ? { match: String(match), matched: hit } : {}), screenshot };
+}
+
 // GATED placement. Walks the wizard to the summary, then clicks #btnConfirm — the single
 // irreversible step. Only runs on execute:true; fire exactly once (index.js never retries).
 export async function place(page, { ref } = {}) {
@@ -340,17 +382,29 @@ export async function place(page, { ref } = {}) {
   }
   // FINAL, irreversible: click Confirm.
   await clickId(page, CONFIRM_SEL, 2500);
-  // Verify: order confirmation surfaced (text or URL), or the Confirm button is gone.
-  let placed = false, statusText = '';
+  // Verify: order confirmation surfaced (text or URL).
+  //
+  // confirmGone is REPORTED but deliberately does not set `placed`. The comment here used to claim
+  // placement was detected "or the Confirm button is gone" while the condition never looked at it,
+  // so it was computed and thrown away every time — and a crash or a redirect removes the button
+  // just as thoroughly as a successful order does, so promoting it to proof would invent placements.
+  //
+  // Reported because the NEGATIVE is worth a great deal. On 2026-09-11 PO 488518 staged all 84
+  // units, clicked Confirm and then read the cart page for 60 seconds, and nobody could say whether
+  // £3k had been spent. If the Confirm button is still sitting there, nothing was submitted and the
+  // order can be re-run safely; only if it has gone is the answer genuinely unknown. That one
+  // boolean is the difference between "retry it" and "go and look at the Hultafors order list".
+  let placed = false, statusText = '', confirmGone = null;
   for (let i = 0; i < 30; i++) {
     await page.waitForTimeout(2000);
     const s = await page.evaluate(() => ({ text: document.body.innerText.slice(0, 4000), url: location.href, confirmGone: !document.querySelector('#btnConfirm') })).catch(() => ({}));
     statusText = s.text || statusText;
+    if (typeof s.confirmGone === 'boolean') confirmGone = s.confirmGone;
     if (/order\s*confirmation|thank you|your order (has been|is) (placed|received|confirmed)|order (number|complete|received|placed)|orderconfirm|receipt/i.test(statusText) || /confirmation|receipt|thankyou|orderplaced|ordercomplete/i.test(s.url || '')) { placed = true; break; }
   }
   const orderNo = (String(statusText).match(/order\s*(?:no|number|confirmation)[^0-9]{0,12}(\d{4,})/i) || [])[1] || null;
   const screenshot = placed ? null : `data:image/png;base64,${(await page.screenshot({ fullPage: true }).catch(() => Buffer.from(''))).toString('base64')}`;
-  return { placed, orderNo, trail: w.trail, url: page.url(), poSet: w.poRes.value || null, statusText: String(statusText).replace(/\s+/g, ' ').slice(0, 400), screenshot };
+  return { placed, orderNo, confirmGone, trail: w.trail, url: page.url(), poSet: w.poRes.value || null, statusText: String(statusText).replace(/\s+/g, ' ').slice(0, 400), screenshot };
 }
 
 // ── WHY was a line dropped? ───────────────────────────────────────────────────

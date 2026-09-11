@@ -108,7 +108,10 @@ async function runOrderInner({ supplier, ref, lines, opts = {}, execute }) {
     await mod.login(page, { user, pass });
     if (opts.inspect && mod.inspect) { const insp = await mod.inspect(page, { lines, creds: { user, pass } }); await closeQuietly(browser); return { ok: true, inspect: true, supplier, ref, ...insp, ms: Date.now() - t0 }; }
     if (opts.checkoutProbe && mod.checkoutProbe) { const staged = await mod.stage(page, { lines, creds: { user, pass }, ...opts }); const probe = await mod.checkoutProbe(page); await closeQuietly(browser); return { ok: true, checkoutProbe: true, supplier, ref, staged: { added: staged.added, cart: staged.cartCount, units: staged.units, ready: staged.ready }, ...probe, ms: Date.now() - t0 }; }
-    if (opts.ordersList && mod.ordersList) { const ol = await mod.ordersList(page); await closeQuietly(browser); return { ok: true, ordersList: true, supplier, ref, ...ol, ms: Date.now() - t0 }; }
+    // opts go through: hultafors.ordersList takes { match } so a caller can ask "is THIS PO in the
+    // list?" and get the matching rows back rather than eyeballing 80 lines of table text. Sterling's
+    // takes no options and ignores them.
+    if (opts.ordersList && mod.ordersList) { const ol = await mod.ordersList(page, { ...opts, ref }); await closeQuietly(browser); return { ok: true, ordersList: true, supplier, ref, ...ol, ms: Date.now() - t0 }; }
     // Ask the portal WHY a line was dropped. Read-only: searches and reads, never touches the
     // basket or the checkout. opts.diagnose = ['<code>', …] (or true, to take them from lines[]).
     // Read-only: does the storefront session actually see the cart? (Blaklader 500 investigation)
