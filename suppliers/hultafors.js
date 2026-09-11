@@ -345,14 +345,26 @@ export async function checkoutProbe(page, { ref } = {}) {
 // treat that as UNKNOWN, never as proof of anything.
 export async function ordersList(page, { match = null } = {}) {
   const tried = [];
+  // Land on the portal home FIRST. The nav is what carries the real orders link
+  // (/en/Order/Search), and on the first live run it was there only because login happened to
+  // leave us on a page that had it — the second run started somewhere else, collected NO links,
+  // fell through to a guessed path and scraped the basket widget instead. Do not depend on where
+  // the previous step left the browser.
+  await page.goto(`${config.base}/en`, { waitUntil: 'domcontentloaded' }).catch(() => {});
+  await page.waitForTimeout(2000);
   const navLinks = await page.evaluate(() => [...document.querySelectorAll('a[href]')]
     .map((a) => ({ href: a.getAttribute('href') || '', txt: (a.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 40) }))
     .filter((l) => /order/i.test(l.txt) || /order/i.test(l.href))
-    .filter((l) => !/basket|cart|checkout|placeorder|forceorder/i.test(l.href))
+    .filter((l) => !/basket|cart|checkout|placeorder|forceorder|detail/i.test(l.href))
     .slice(0, 12)).catch(() => []);
-  // The portal's own "orders" links first; the documented history paths only as a fallback.
-  const candidates = [...new Set([...navLinks.map((l) => l.href), '/en/Order/Orders', '/en/Orders', '/en/Order/History'])];
-  let rows = [], ordersUrl = null;
+  const candidates = [...new Set([...navLinks.map((l) => l.href), '/en/Order/Search', '/en/Order/Orders', '/en/Orders'])];
+  // A page is the order list ONLY if it carries the list's own column header. The previous test —
+  // two rows, one containing a 4-digit number — is satisfied by the basket widget ("Product Qty
+  // Price" + line rows), and on the second live run it accepted exactly that and reported no
+  // matching order. found:true must mean "I read the order list", or a false "not placed" gets a
+  // GBP3k order bought twice.
+  const isHeader = (t) => /order\s*no/i.test(t) && /(customer|order\s*status|order\s*date)/i.test(t);
+  let rows = [], ordersUrl = null, headerSeen = null;
   for (const href of candidates) {
     if (!href || /^javascript:/i.test(href)) continue;
     const url = href.startsWith('http') ? href : `${config.base}${href.startsWith('/') ? '' : '/'}${href}`;
@@ -362,13 +374,15 @@ export async function ordersList(page, { match = null } = {}) {
     const found = await page.evaluate(() => [...document.querySelectorAll('tr')]
       .map((tr) => tr.innerText.replace(/\s+/g, ' ').trim())
       .filter((t) => t && t.length < 300).slice(0, 80)).catch(() => []);
-    // A real order table has several rows and at least one that looks like an order line. One
-    // stray <tr> on a menu page is not an order list, and must not be reported as an empty one.
-    if (found.length >= 2 && found.some((t) => /\d{4,}/.test(t))) { rows = found; ordersUrl = page.url(); break; }
+    const hdr = found.find(isHeader);
+    if (hdr) { rows = found; ordersUrl = page.url(); headerSeen = hdr; break; }
   }
-  const hit = match ? rows.filter((r) => r.includes(String(match))) : [];
-  const screenshot = rows.length ? null : `data:image/png;base64,${(await page.screenshot({ fullPage: true }).catch(() => Buffer.from(''))).toString('base64')}`;
-  return { found: rows.length > 0, ordersUrl, rows, tried, navLinks, ...(match ? { match: String(match), matched: hit } : {}), screenshot };
+  // Only the rows BELOW the header are orders; the basket widget renders on the same page and its
+  // lines would otherwise be searched for the PO number too.
+  const orderRows = headerSeen ? rows.slice(rows.indexOf(headerSeen) + 1) : [];
+  const hit = match ? orderRows.filter((r) => r.includes(String(match))) : [];
+  const screenshot = headerSeen ? null : `data:image/png;base64,${(await page.screenshot({ fullPage: true }).catch(() => Buffer.from(''))).toString('base64')}`;
+  return { found: !!headerSeen, headerSeen, ordersUrl, rows, orderRows, tried, navLinks, ...(match ? { match: String(match), matched: hit } : {}), screenshot };
 }
 
 // GATED placement. Walks the wizard to the summary, then clicks #btnConfirm — the single
