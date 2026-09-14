@@ -196,6 +196,47 @@ function byUrlLineCount(lines) {
   return new Set(lines.map((l) => String(l.pid))).size;
 }
 
+// Diagnostic: reach the checkout screen and watch the terms checkbox over time, WITHOUT filling
+// the PO field or clicking place_order. Never stages — call with lines:[] (stage() no-ops on an
+// empty array, see above) so this runs against whatever the basket already holds; safe to use on a
+// basket left stuck by a failed run.
+export async function checkoutProbe(page) {
+  await page.goto(`${BASE}/checkout/`, { waitUntil: 'domcontentloaded', timeout: 90000 });
+  const dump = async (label) => ({
+    label,
+    ...(await page.evaluate(() => {
+      const t = document.querySelector('input#terms, input[name="terms"]');
+      if (!t) return { exists: false };
+      const r = t.getBoundingClientRect();
+      const s = getComputedStyle(t);
+      const wrap = t.closest('label, .woocommerce-form__label-for-checkbox, p');
+      return {
+        exists: true, checked: t.checked, disabled: t.disabled,
+        display: s.display, visibility: s.visibility, opacity: s.opacity,
+        w: Math.round(r.width), h: Math.round(r.height),
+        outerHTML: t.outerHTML.slice(0, 300),
+        wrapTag: wrap ? wrap.tagName : null,
+      };
+    }).catch(() => ({ evalError: true }))),
+  });
+
+  const radio = await page.$('input[name="payment_method"][value="b2b_credit_limit"]');
+  const before = await dump('before-payment-method');
+  if (radio) { await radio.check().catch(() => {}); await page.waitForTimeout(1500); }
+  const afterRadio = await dump('after-payment-method-1500ms');
+
+  const terms = await page.$('input#terms, input[name="terms"]');
+  let checkError = null;
+  if (terms) {
+    try { await terms.check(); } catch (e) { checkError = e.message; }
+  }
+  const immediatelyAfterCheck = await dump('immediately-after-check');
+  await page.waitForTimeout(2500);
+  const settled = await dump('2500ms-after-check');
+
+  return { url: page.url(), before, afterRadio, checkError, immediatelyAfterCheck, settled };
+}
+
 // Checkout. po_field carries OUR Brightpearl PO number and the site rejects an empty one; it only
 // renders while payment_method=b2b_credit_limit is selected. b2b_credit_limit is a trade CREDIT
 // account — no card details are involved at any point.
