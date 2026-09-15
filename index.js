@@ -179,6 +179,52 @@ app.get('/job/:id', (req, res) => {
   return res.json({ status: 'running', runningMs: Date.now() - (j.started || Date.now()) });
 });
 
+// PDF of a Brightpearl print view — exactly what "Print → Save as PDF" gives in
+// Chrome, because it IS Chrome. Brightpearl only produces its own PDF inside the
+// email flow (no download URL), so the backend hands us its logged-in session
+// cookies and the template_print.php URL, and we print it with print media.
+// Body: { url, cookies: [{ name, value, domain, path, secure?, httpOnly? }], waitMs? }
+// Reply: { ok, bytes, pdfBase64, title }. Hosts are restricted to Brightpearl so
+// this cannot be pointed at anything else.
+const PRINT_HOSTS = /(^|.)brightpearlapp.com$/i;
+app.post('/print-pdf', async (req, res) => {
+  if (!auth(req)) return res.status(401).json({ error: 'bad secret' });
+  const { url, cookies, waitMs = 1500 } = req.body || {};
+  let host;
+  try { host = new URL(url).hostname; } catch { return res.status(400).json({ error: 'url required' }); }
+  if (!PRINT_HOSTS.test(host)) return res.status(400).json({ error: `refusing to print ${host}` });
+  if (!Array.isArray(cookies) || !cookies.length) return res.status(400).json({ error: 'cookies[] required (a logged-in Brightpearl session)' });
+
+  let browser;
+  const started = Date.now();
+  try {
+    browser = await launch();
+    const context = await browser.newContext({ viewport: { width: 1200, height: 1600 } });
+    await context.addCookies(cookies.map((c) => ({
+      name: c.name, value: c.value, domain: c.domain || host, path: c.path || '/',
+      secure: c.secure !== false, httpOnly: !!c.httpOnly, sameSite: 'Lax',
+    })));
+    const page = await context.newPage();
+    await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
+    const title = await page.title();
+    // A session that has lapsed lands on the login page and would print THAT.
+    if (/Brightpearl - Login/i.test(title) || await page.$('input[name="email_address"]')) {
+      return res.status(401).json({ error: 'Brightpearl session not authenticated — the print page came back as the login form', title });
+    }
+    if (waitMs) await page.waitForTimeout(Math.min(Number(waitMs) || 0, 10000));
+    await page.emulateMedia({ media: 'print' });
+    const pdf = await page.pdf({ format: 'A4', printBackground: true, preferCSSPageSize: true,
+      margin: { top: '10mm', bottom: '10mm', left: '10mm', right: '10mm' } });
+    console.log(`[print-pdf] ${title} — ${pdf.length} bytes in ${Date.now() - started}ms`);
+    res.json({ ok: true, bytes: pdf.length, title, pdfBase64: Buffer.from(pdf).toString('base64') });
+  } catch (e) {
+    console.error('[print-pdf] failed:', e.message);
+    res.status(500).json({ error: e.message });
+  } finally {
+    await closeQuietly(browser);
+  }
+});
+
 // forget finished jobs after 30 min so the map doesn't grow unbounded
 setInterval(() => { const cutoff = Date.now() - 30 * 60 * 1000; for (const [k, v] of jobs) if (v.status !== 'running' && (v.ended || 0) < cutoff) jobs.delete(k); }, 10 * 60 * 1000);
 
