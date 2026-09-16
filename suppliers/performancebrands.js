@@ -196,6 +196,20 @@ function byUrlLineCount(lines) {
   return new Set(lines.map((l) => String(l.pid))).size;
 }
 
+// Selecting the payment method fires WooCommerce's update_checkout AJAX, which blocks the form
+// behind a .blockUI overlay and — on this theme — completely REPLACES the #payment box (terms
+// checkbox included) once the response lands. Error 285/343: a fixed 1500ms sleep here raced that
+// replace — on a full cart (9 lines, 47 units) the AJAX call outlasted it, so the terms element
+// handle grabbed right after was the PRE-refresh node, and Playwright's own click-retry loop
+// watched it get torn out from under the click mid-attempt ("Element is not attached to the DOM").
+// checkoutProbe's own dump confirmed it: the blockOverlay div was intercepting pointer events right
+// before the element went stale. Wait for the overlay to actually clear instead of guessing how
+// long that takes — same principle as stage()'s wait for the Add button to enable.
+async function waitForCheckoutSettled(page, { timeout = 20000 } = {}) {
+  await page.waitForSelector('.blockUI.blockOverlay', { state: 'attached', timeout: 2000 }).catch(() => {});
+  await page.waitForSelector('.blockUI.blockOverlay', { state: 'detached', timeout }).catch(() => {});
+}
+
 // Diagnostic: reach the checkout screen and watch the terms checkbox over time, WITHOUT filling
 // the PO field or clicking place_order. Never stages — call with lines:[] (stage() no-ops on an
 // empty array, see above) so this runs against whatever the basket already holds; safe to use on a
@@ -222,8 +236,8 @@ export async function checkoutProbe(page) {
 
   const radio = await page.$('input[name="payment_method"][value="b2b_credit_limit"]');
   const before = await dump('before-payment-method');
-  if (radio) { await radio.check().catch(() => {}); await page.waitForTimeout(1500); }
-  const afterRadio = await dump('after-payment-method-1500ms');
+  if (radio) { await radio.check().catch(() => {}); await waitForCheckoutSettled(page); }
+  const afterRadio = await dump('after-payment-method-settled');
 
   const terms = await page.$('input#terms, input[name="terms"]');
   let checkError = null;
@@ -245,7 +259,7 @@ export async function place(page, { ref } = {}) {
   await page.goto(`${BASE}/checkout/`, { waitUntil: 'domcontentloaded', timeout: 90000 });
 
   const radio = await page.$('input[name="payment_method"][value="b2b_credit_limit"]');
-  if (radio) { await radio.check().catch(() => {}); await page.waitForTimeout(1500); }
+  if (radio) { await radio.check().catch(() => {}); await waitForCheckoutSettled(page); }
 
   const po = await page.$('#po_field, input[name="po_field"]');
   if (!po) {
