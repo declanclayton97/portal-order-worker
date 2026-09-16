@@ -275,14 +275,54 @@ export async function place(page, { ref } = {}) {
   // part of placing the trade order that was asked for — the same box a buyer ticks by hand — and
   // it is checked for explicitly rather than blind-clicked, so if the box ever moves this fails
   // loudly instead of placing an order that skipped it.
-  const terms = await page.$('input#terms, input[name="terms"]');
-  if (terms) {
-    await terms.check().catch(async () => { await terms.click().catch(() => {}); });
-    const ticked = await page.evaluate(() => {
-      const t = document.querySelector('input#terms, input[name="terms"]');
-      return !!t && t.checked;
-    });
-    if (!ticked) throw new Error('could not tick the terms checkbox — refusing to attempt the order');
+  // Ticking the payment radio fires WooCommerce's update_order_review AJAX, which blocks the form
+  // and REPLACES the checkout markup. A handle taken before that is stale, so check() and click()
+  // both fail against a detached node and the box is still unticked when we look — which is exactly
+  // what "could not tick the terms checkbox" has been reporting (PO 489405, 2026-09-16, and the
+  // 14:30 run before it). Wait for the form to settle, then re-query on EVERY attempt.
+  //
+  // Woo themes also hide the real input behind a styled label, and Playwright refuses to act on a
+  // non-visible element — so the label is tried before falling back to setting the property and
+  // firing `change`, which is what the theme's own handler listens for.
+  const termsIdle = async () => {
+    await page.waitForFunction(() => !document.querySelector('.blockUI, .blockOverlay')
+      && !document.querySelector('form.checkout.processing'), { timeout: 20000 }).catch(() => {});
+  };
+  const termsTicked = () => page.evaluate(() => {
+    const t = document.querySelector('input#terms, input[name="terms"]');
+    return !!t && t.checked;
+  });
+  const termsPresent = () => page.evaluate(() => !!document.querySelector('input#terms, input[name="terms"]'));
+
+  await termsIdle();
+  if (await termsPresent()) {
+    const attempts = [
+      async () => { const t = await page.$('input#terms, input[name="terms"]'); if (t) await t.check({ timeout: 5000 }); },
+      async () => { const l = await page.$('label[for="terms"], .woocommerce-terms-and-conditions-checkbox-text'); if (l) await l.click({ timeout: 5000 }); },
+      async () => { const t = await page.$('input#terms, input[name="terms"]'); if (t) await t.click({ timeout: 5000, force: true }); },
+      async () => {
+        await page.evaluate(() => {
+          const t = document.querySelector('input#terms, input[name="terms"]');
+          if (!t) return;
+          t.checked = true;
+          t.dispatchEvent(new Event('change', { bubbles: true }));
+          t.dispatchEvent(new Event('click', { bubbles: true }));
+        });
+      },
+    ];
+    let ticked = await termsTicked();
+    const tried = [];
+    for (let i = 0; i < attempts.length && !ticked; i++) {
+      try { await attempts[i](); } catch (e) { tried.push(`${i}:${String(e.message).split('\n')[0].slice(0, 60)}`); }
+      await termsIdle();
+      ticked = await termsTicked();
+      if (!ticked) tried.push(`${i}:still unticked`);
+    }
+    if (!ticked) {
+      const e = new Error('could not tick the terms checkbox — refusing to attempt the order');
+      e.termsAttempts = tried;   // WHICH routes were tried and how each failed, so this is diagnosable
+      throw e;
+    }
   }
 
   const totalBefore = await page.evaluate(() => {
