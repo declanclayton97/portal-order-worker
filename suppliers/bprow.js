@@ -119,6 +119,12 @@ export async function place(page) {
   const found = await page.waitForSelector(btn, { state: 'attached', timeout: 15000 }).catch(() => null);
   if (!found) {
     const diag = { before: page.__bprowControlsBefore || null, after: await controlsSnapshot(page), url: page.url() };
+    // An EMPTY toolbar (no buttons at all, not just no Save) is Brightpearl's order LOCK: someone
+    // has the order open, so every other session gets it read-only. Proven on SO 492048
+    // (2026-09-29): failed three times while Dec had it open, saved first time once it was closed.
+    if (diag.before && diag.before.present && !diag.before.btns.length) {
+      throw new Error(`order ${st.orderId} is OPEN by someone in Brightpearl (read-only for us, no toolbar) — nothing saved; close it and retry`);
+    }
     throw new Error(`Save changes button not found — ${JSON.stringify(diag)}`);
   }
   await Promise.all([page.waitForLoadState('load').catch(() => {}), page.click(btn).catch(() => {})]);
