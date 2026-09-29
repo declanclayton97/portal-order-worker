@@ -46,19 +46,23 @@ export async function ordersList(page, { pos: posIn = [], lines = [] } = {}) {
     const out = [];
     for (const po of list) {
       const ref = `TW${po}`;
-      let hit = null;
+      // EVERY order carrying this reference: a back-order release ships as its own order under
+      // the original PO's TW number, so the caller needs them all to pick the right shipment.
+      const hits = [];
       for (const hist of ['', 'history=1&']) {
         const r = await fetch(`/api/internal/orders/page?${hist}page=1&sort-by=date-desc&q=${encodeURIComponent(ref)}`, { headers: { Accept: 'application/json' } });
         if (!r.ok) continue;
         const j = await r.json().catch(() => null);
-        hit = ((j && j.data) || []).find((o) => String(o.reference || '').trim().toUpperCase() === ref);
-        if (hit) { hit.__where = hist ? 'history' : 'current'; break; }
+        for (const o of (j && j.data) || []) {
+          if (String(o.reference || '').trim().toUpperCase() !== ref || hits.some((h) => h.number === o.number)) continue;
+          hits.push({
+            where: hist ? 'history' : 'current', number: o.number, status: o.status_description || o.status,
+            despatched: !!o.despatched, shippedBy: o.shipped_by || null, shippedAt: o.shipped_at || null,
+            createdAt: o.created_at || null, trackingUrl: o.tracking_url || null,
+          });
+        }
       }
-      out.push(hit ? {
-        po, found: true, where: hit.__where, number: hit.number, status: hit.status_description || hit.status,
-        despatched: !!hit.despatched, shippedBy: hit.shipped_by || null, shippedAt: hit.shipped_at || null,
-        trackingUrl: hit.tracking_url || null, canTrack: !!hit.can_track,
-      } : { po, found: false });
+      out.push(hits.length ? { po, found: true, orders: hits } : { po, found: false });
       await new Promise((res) => setTimeout(res, 400));
     }
     return out;
