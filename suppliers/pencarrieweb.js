@@ -39,8 +39,9 @@ export async function login(page, { user, pass }) {
   return { signedIn: true };
 }
 
-export async function ordersList(page, { lines = [] } = {}) {
-  const pos = [...new Set(lines.map((l) => String(l.po || '').trim()).filter((p) => /^\d{5,7}$/.test(p)))];
+// The worker hands list jobs their opts, not lines — so the POs come in as opts.pos.
+export async function ordersList(page, { pos: posIn = [], lines = [] } = {}) {
+  const pos = [...new Set([...posIn, ...lines.map((l) => l.po)].map((p) => String(p || '').trim()).filter((p) => /^\d{5,7}$/.test(p)))];
   const results = await page.evaluate(async (list) => {
     const out = [];
     for (const po of list) {
