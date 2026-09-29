@@ -44,6 +44,21 @@ async function readLines(page) {
   });
 }
 
+// The order toolbar as the page has it right now: its buttons, and the start of its markup.
+async function controlsSnapshot(page) {
+  return page.evaluate(() => {
+    const pc = document.getElementById('page-controls');
+    return {
+      present: !!pc,
+      saveLinks: document.querySelectorAll('a[onclick*="saveInvoice"]').length,
+      btns: pc ? [...pc.querySelectorAll('a, button')].map((b) => b.textContent.replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 12) : [],
+      html: pc ? pc.innerHTML.replace(/\s+/g, ' ').trim().slice(0, 700) : null,
+      locked: !!document.querySelector('.locked, #order-locked, .lock-message'),
+      viewport: { w: window.innerWidth, h: window.innerHeight },
+    };
+  });
+}
+
 const isPlaceholder = (r) => r && String(r.productId) === '1000' && String(r.details || '').trim() === '-'
   && Number(String(r.itemnet || '0').replace(/[^\d.-]/g, '')) === 0;
 
@@ -60,6 +75,9 @@ export async function stage(page, { lines }) {
     throw new Error(`order ${orderId} page did not load an editable order — ${JSON.stringify(diag)}`);
   }
   const before = await readLines(page);
+  // What the toolbar holds BEFORE anything is touched — to tell "empty from the start" from
+  // "emptied by the delete" (SO 492048: #page-controls present but no buttons after the ×).
+  page.__bprowControlsBefore = await controlsSnapshot(page);
   const checks = wanted.map((rowId) => {
     const r = before.rows.find((x) => x.rowId === rowId);
     if (!r) return { rowId, ok: false, reason: 'line not on this order' };
@@ -100,8 +118,7 @@ export async function place(page) {
   // already worked): paid SO 492048 failed twice with "Save changes button not found" (2026-09-29).
   const found = await page.waitForSelector(btn, { state: 'attached', timeout: 15000 }).catch(() => null);
   if (!found) {
-    const diag = await page.evaluate(() => ({ url: location.href, controls: !!document.getElementById('page-controls'),
-      btns: [...document.querySelectorAll('#page-controls a.btn, a.btn')].map((b) => b.textContent.replace(/\s+/g, ' ').trim()).slice(0, 8) }));
+    const diag = { before: page.__bprowControlsBefore || null, after: await controlsSnapshot(page), url: page.url() };
     throw new Error(`Save changes button not found — ${JSON.stringify(diag)}`);
   }
   await Promise.all([page.waitForLoadState('load').catch(() => {}), page.click(btn).catch(() => {})]);
