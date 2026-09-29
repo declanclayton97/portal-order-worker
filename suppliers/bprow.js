@@ -95,7 +95,15 @@ export async function place(page) {
 
   // Save — the same handler the delivery-mobile module uses.
   const btn = 'a[onclick*="saveInvoice"]';
-  if (!(await page.$(btn))) throw new Error('Save changes button not found');
+  // WAIT for it. The page is opened at domcontentloaded and BP builds the #page-controls toolbar
+  // with script after that, so an immediate page.$ missed a button that was there (the × delete had
+  // already worked): paid SO 492048 failed twice with "Save changes button not found" (2026-09-29).
+  const found = await page.waitForSelector(btn, { state: 'attached', timeout: 15000 }).catch(() => null);
+  if (!found) {
+    const diag = await page.evaluate(() => ({ url: location.href, controls: !!document.getElementById('page-controls'),
+      btns: [...document.querySelectorAll('#page-controls a.btn, a.btn')].map((b) => b.textContent.replace(/\s+/g, ' ').trim()).slice(0, 8) }));
+    throw new Error(`Save changes button not found — ${JSON.stringify(diag)}`);
+  }
   await Promise.all([page.waitForLoadState('load').catch(() => {}), page.click(btn).catch(() => {})]);
   await page.waitForTimeout(3000);
 
