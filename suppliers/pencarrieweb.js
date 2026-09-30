@@ -105,7 +105,7 @@ export async function backorders(page, { pcGet = [] } = {}) {
     for (const p of paths) {
       if (!/^\/api\/internal\//.test(p)) { out.push({ path: p, error: 'not an /api/internal/ path' }); continue; }
       const r = await fetch(p, { headers: { Accept: 'application/json' } }).catch((e) => ({ status: 0, text: async () => String(e) }));
-      out.push({ path: p, status: r.status, body: (await r.text()).slice(0, 8000) });
+      out.push({ path: p, status: r.status, body: (await r.text()).slice(0, 400000) });
     }
     return out;
   }, (Array.isArray(pcGet) ? pcGet : []).slice(0, 10));
