@@ -70,6 +70,38 @@ export async function ordersList(page, { pos: posIn = [], lines = [] } = {}) {
   return { results };
 }
 
+// READ-ONLY look at the Back Orders page (/orders/backorders). PenCarrie do not ship a back order
+// when it lands: it becomes "available to add to the current order" there, and someone has to add
+// it (user, 2026-09-30). Before automating that, record what the page shows and — more usefully —
+// the page's OWN data calls (/api/internal/…), so the release can be driven the way the site does
+// it. Clicks nothing. Returns the calls with their bodies, the table text, and every button/link.
+export async function backorders(page) {
+  const calls = [];
+  const onResp = async (res) => {
+    const url = res.url();
+    if (!/\/api\/internal\//.test(url)) return;
+    let body = null;
+    try { body = (await res.text()).slice(0, 6000); } catch { /* body gone */ }
+    calls.push({ url: url.replace(BASE, ''), method: res.request().method(), status: res.status(), body });
+  };
+  page.on('response', onResp);
+  await page.goto(`${BASE}/orders/backorders`, { waitUntil: 'networkidle' }).catch(() => {});
+  await page.waitForTimeout(2500);
+  page.off('response', onResp);
+  const view = await page.evaluate(() => ({
+    url: location.href, title: document.title,
+    rows: [...document.querySelectorAll('table tr')].map((tr) => tr.innerText.replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 60),
+    controls: [...document.querySelectorAll('button, a.btn, input[type=submit], input[type=checkbox], a[href*="backorder"], [data-action]')]
+      .map((e) => ({ tag: e.tagName, text: (e.innerText || e.value || '').replace(/\s+/g, ' ').trim().slice(0, 60), name: e.name || null,
+        href: e.getAttribute('href'), action: e.getAttribute('data-action') || e.getAttribute('formaction') || null, disabled: !!e.disabled }))
+      .filter((c) => c.text || c.href || c.name).slice(0, 60),
+    forms: [...document.querySelectorAll('form')].map((f) => ({ action: f.getAttribute('action'), method: f.getAttribute('method') })).slice(0, 10),
+    text: document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 3000),
+  }));
+  const shot = `data:image/png;base64,${(await page.screenshot({ fullPage: true })).toString('base64')}`;
+  return { ...view, calls, screenshot: shot };
+}
+
 // The worker's contract expects these; this module never places anything.
 export async function stage() { return { ready: false, note: 'read-only module — use opts.ordersList' }; }
 export async function place() { throw new Error('pencarrieweb is read-only'); }

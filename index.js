@@ -112,6 +112,8 @@ async function runOrderInner({ supplier, ref, lines, opts = {}, execute }) {
     // list?" and get the matching rows back rather than eyeballing 80 lines of table text. Sterling's
     // takes no options and ignores them.
     if (opts.ordersList && mod.ordersList) { const ol = await mod.ordersList(page, { ...opts, ref }); await closeQuietly(browser); return { ok: true, ordersList: true, supplier, ref, ...ol, ms: Date.now() - t0 }; }
+    // Read-only page explorer (pencarrieweb back orders): what the page shows and the data calls it makes.
+    if (opts.backorders && mod.backorders) { const bo = await mod.backorders(page, { ...opts, ref }); await closeQuietly(browser); return { ok: true, backorders: true, supplier, ref, ...bo, ms: Date.now() - t0 }; }
     // Ask the portal WHY a line was dropped. Read-only: searches and reads, never touches the
     // basket or the checkout. opts.diagnose = ['<code>', …] (or true, to take them from lines[]).
     // Read-only: does the storefront session actually see the cart? (Blaklader 500 investigation)
