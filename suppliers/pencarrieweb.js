@@ -75,7 +75,7 @@ export async function ordersList(page, { pos: posIn = [], lines = [] } = {}) {
 // it (user, 2026-09-30). Before automating that, record what the page shows and — more usefully —
 // the page's OWN data calls (/api/internal/…), so the release can be driven the way the site does
 // it. Clicks nothing. Returns the calls with their bodies, the table text, and every button/link.
-export async function backorders(page) {
+export async function backorders(page, { pcGet = [] } = {}) {
   const calls = [];
   const onResp = async (res) => {
     const url = res.url();
@@ -98,8 +98,19 @@ export async function backorders(page) {
     forms: [...document.querySelectorAll('form')].map((f) => ({ action: f.getAttribute('action'), method: f.getAttribute('method') })).slice(0, 10),
     text: document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 3000),
   }));
+  // Extra READ-ONLY lookups (GET only, /api/internal/ only) — e.g. an order's full record, to see
+  // whether an API-placed order is still editable and so can take a back order.
+  const gets = await page.evaluate(async (paths) => {
+    const out = [];
+    for (const p of paths) {
+      if (!/^\/api\/internal\//.test(p)) { out.push({ path: p, error: 'not an /api/internal/ path' }); continue; }
+      const r = await fetch(p, { headers: { Accept: 'application/json' } }).catch((e) => ({ status: 0, text: async () => String(e) }));
+      out.push({ path: p, status: r.status, body: (await r.text()).slice(0, 8000) });
+    }
+    return out;
+  }, (Array.isArray(pcGet) ? pcGet : []).slice(0, 10));
   const shot = `data:image/png;base64,${(await page.screenshot({ fullPage: true })).toString('base64')}`;
-  return { ...view, calls, screenshot: shot };
+  return { ...view, calls, gets, screenshot: shot };
 }
 
 // The worker's contract expects these; this module never places anything.
