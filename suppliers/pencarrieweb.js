@@ -113,6 +113,53 @@ export async function backorders(page, { pcGet = [] } = {}) {
   return { ...view, calls, gets, screenshot: shot };
 }
 
+// RELEASE available back orders onto an existing PenCarrie order (user, 2026-09-30: back orders
+// don't ship on their own — they become "available to add to the current order"). This is the
+// site's own "Add to order" button: POST /api/internal/backorders/{id}/ship/{orderCode}, one per
+// line (read from the page's JS bundle, shipBackorders). Only lines PenCarrie marks available now,
+// shippable and not special-order are sent. execute=false only LISTS what would go.
+// After sending, the order is read back and each released SKU must appear on it with stock
+// allocated — the POST's own 2xx is not taken as proof.
+export async function shipBackorders(page, { orderCode, ids = null, execute = false } = {}) {
+  if (!/^[A-Z0-9_]+$/i.test(String(orderCode || ''))) throw new Error('shipBackorders: orderCode required (e.g. TUWO_TW492805)');
+  await page.goto(`${BASE}/orders/backorders`, { waitUntil: 'domcontentloaded' }).catch(() => {});
+  return page.evaluate(async ({ orderCode, ids, execute }) => {
+    const csrf = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
+    const hdr = { Accept: 'application/json', 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-TOKEN': csrf };
+    const getJ = async (p) => { const r = await fetch(p, { headers: hdr }); return { status: r.status, j: await r.json().catch(() => null) }; };
+    const bo = await getJ('/api/internal/backorders?detail=false');
+    if (bo.status !== 200 || !Array.isArray(bo.j)) return { ok: false, error: `backorders list HTTP ${bo.status}` };
+    const target = await getJ(`/api/internal/orders/${orderCode}`);
+    if (target.status !== 200 || !target.j) return { ok: false, error: `order ${orderCode} not readable (HTTP ${target.status})` };
+    const t = target.j;
+    if (!t.can_edit || t.despatched || t.cancelled) return { ok: false, error: `order ${orderCode} cannot take lines (status ${t.status}, can_edit ${t.can_edit}, despatched ${t.despatched})` };
+    const want = bo.j.filter((b) => b.is_available && b.can_ship && !b.is_special_order && !b.locked
+      && (!ids || ids.map(Number).includes(Number(b.id))));
+    const lines = want.map((b) => ({ id: b.id, sku: b.sku, qty: (b.available || []).filter((a) => a.available_now).reduce((s, a) => s + (a.quantity || 0), 0) || b.backorder,
+      fromOrder: b.order && b.order.code, fromRef: String((b.order && b.order.reference) || b.reference || '').trim(), lineRef: String(b.reference || '').trim() }));
+    const notYet = bo.j.filter((b) => !want.includes(b)).map((b) => ({ id: b.id, sku: b.sku, fromRef: String((b.order && b.order.reference) || '').trim(), available: !!b.is_available, part: !!b.is_part_available }));
+    if (!execute) return { ok: true, dryRun: true, orderCode, orderStatus: t.status, wouldShip: lines, notYet, csrf: !!csrf };
+    const before = new Map((t.items || []).map((i) => [i.sku, i.quantity || 0]));
+    const sent = [];
+    for (const l of lines) {
+      const r = await fetch(`/api/internal/backorders/${l.id}/ship/${orderCode}`, { method: 'POST', headers: hdr, body: '{}' });
+      sent.push({ ...l, status: r.status, body: (await r.text().catch(() => '')).slice(0, 300) });
+      await new Promise((res) => setTimeout(res, 500));
+    }
+    await new Promise((res) => setTimeout(res, 2500));
+    const after = await getJ(`/api/internal/orders/${orderCode}`);
+    const items = (after.j && after.j.items) || [];
+    for (const s of sent) {
+      const onOrder = items.filter((i) => i.sku === s.sku).reduce((a, i) => a + (i.quantity || 0), 0);
+      s.verified = s.status < 300 && onOrder >= (before.get(s.sku) || 0) + s.qty;
+      s.onOrderQty = onOrder;
+    }
+    const left = await getJ('/api/internal/backorders?detail=false');
+    for (const s of sent) s.stillBackordered = Array.isArray(left.j) && left.j.some((b) => b.id === s.id);
+    return { ok: sent.every((s) => s.verified), orderCode, orderStatus: after.j && after.j.status, net: after.j && after.j.net, sent, notYet };
+  }, { orderCode, ids, execute: !!execute });
+}
+
 // The worker's contract expects these; this module never places anything.
 export async function stage() { return { ready: false, note: 'read-only module — use opts.ordersList' }; }
 export async function place() { throw new Error('pencarrieweb is read-only'); }
