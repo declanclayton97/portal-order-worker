@@ -106,6 +106,9 @@ async function runOrderInner({ supplier, ref, lines, opts = {}, execute }) {
     browser = await launch();
     const page = await (await browser.newContext()).newPage();
     await mod.login(page, { user, pass });
+    // Log in and hand back the portal's session token (beeswift: one session per account, so the
+    // run logs in seconds before its basket instead of trusting a token a staff login may have killed).
+    if (opts.sessionToken && mod.sessionToken) { const st = await mod.sessionToken(page); await closeQuietly(browser); return { ok: true, sessionToken: true, supplier, ref, ...st, ms: Date.now() - t0 }; }
     if (opts.inspect && mod.inspect) { const insp = await mod.inspect(page, { lines, creds: { user, pass } }); await closeQuietly(browser); return { ok: true, inspect: true, supplier, ref, ...insp, ms: Date.now() - t0 }; }
     if (opts.checkoutProbe && mod.checkoutProbe) { const staged = await mod.stage(page, { lines, creds: { user, pass }, ...opts }); const probe = await mod.checkoutProbe(page); await closeQuietly(browser); return { ok: true, checkoutProbe: true, supplier, ref, staged: { added: staged.added, cart: staged.cartCount, units: staged.units, ready: staged.ready }, ...probe, ms: Date.now() - t0 }; }
     // opts go through: hultafors.ordersList takes { match } so a caller can ask "is THIS PO in the
