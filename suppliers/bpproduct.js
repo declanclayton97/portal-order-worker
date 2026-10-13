@@ -51,6 +51,15 @@ export async function inspect(page, { lines }) {
   const id = lines && lines[0] && lines[0].productId;
   if (!id) throw new Error('lines[0].productId required');
   const o = await openProduct(page, id, lines[0].expectSku);
+  // Where does this product's data actually sit? Any input/element holding the SKU or barcode.
+  const needles = [lines[0].expectSku, lines[0].expectBarcode].filter(Boolean).map(String);
+  o.holders = await page.evaluate((N) => {
+    const out = [];
+    for (const e of document.querySelectorAll('input,textarea,select')) if (N.some((n) => String(e.value).includes(n))) out.push({ tag: e.tagName, name: e.name, id: e.id, type: e.type, value: String(e.value).slice(0, 40), form: e.form && (e.form.name || e.form.id || e.form.action), visible: !!(e.offsetWidth || e.offsetHeight) });
+    const txt = []; for (const el of document.querySelectorAll('td,span,div,a')) if (el.children.length === 0 && N.some((n) => el.textContent.includes(n))) txt.push({ tag: el.tagName, id: el.id, cls: el.className, text: el.textContent.trim().slice(0, 60), href: el.getAttribute && el.getAttribute('href') });
+    const frames = [...document.querySelectorAll('iframe')].map((f) => f.src).slice(0, 5);
+    return { inputs: out.slice(0, 20), text: txt.slice(0, 12), frames, tabs: [...document.querySelectorAll('a[href^="#"]')].map((a) => a.getAttribute('href') + ':' + a.textContent.trim()).slice(0, 20) };
+  }, needles);
   const saves = await page.evaluate(() => [...document.querySelectorAll('a,button,input[type=submit]')]
     .filter((b) => /save|update/i.test((b.textContent || b.value || '') + ' ' + (b.getAttribute('onclick') || '')))
     .map((b) => ({ tag: b.tagName, text: (b.textContent || b.value || '').trim().slice(0, 40), onclick: (b.getAttribute('onclick') || '').slice(0, 80), id: b.id })).slice(0, 12));
