@@ -23,18 +23,26 @@ const URLS = [
 ];
 
 const fields = (page) => page.evaluate(() => [...document.querySelectorAll('input,select,textarea')]
-  .filter((e) => e.name && /barcode|ean|upc|isbn|mpn|sku/i.test(e.name + ' ' + e.id))
+  .filter((e) => e.name && /barcode|ean|upc|isbn|mpn|sku|model/i.test(e.name + ' ' + e.id))
   .map((e) => ({ name: e.name, id: e.id, type: e.type, value: e.value, visible: !!(e.offsetWidth || e.offsetHeight) })));
 
-async function openProduct(page, id) {
+// SAFETY: a product URL that does not resolve can render the BLANK "new product" form, which has
+// the same barcode input — saving that would CREATE a product. So a page only counts as this
+// product once one of its fields holds the product's own SKU (the caller passes expectSku).
+const holdsSku = (f, sku) => !!sku && f.some((x) => x.type !== 'hidden' && String(x.value).trim().toUpperCase() === String(sku).trim().toUpperCase());
+
+async function openProduct(page, id, sku) {
   const tried = [];
   for (const u of URLS) {
     const url = u(id);
-    await page.goto(url, { waitUntil: 'domcontentloaded' });
-    const f = await fields(page);
-    const bc = f.find((x) => /^barcode$|products_barcode|\bbarcode\b/i.test(x.name));
-    tried.push({ url, title: await page.title(), fieldCount: f.length });
-    if (bc) return { url, fields: f, barcodeField: bc };
+    await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 }).catch(() => {});
+    // the editor fills its inputs by script after load; give it time to show a value
+    let f = await fields(page);
+    for (let i = 0; i < 10 && !f.some((x) => x.value && x.type !== 'hidden'); i++) { await page.waitForTimeout(1000); f = await fields(page); }
+    const bc = f.find((x) => /products_barcode|^barcode$/i.test(x.name));
+    const isIt = holdsSku(f, sku);
+    tried.push({ url, title: await page.title(), filled: f.filter((x) => x.value).map((x) => `${x.name}=${x.value}`).slice(0, 8), holdsSku: isIt });
+    if (bc && isIt) return { url, fields: f, barcodeField: bc, tried };
   }
   return { url: null, tried };
 }
@@ -42,7 +50,7 @@ async function openProduct(page, id) {
 export async function inspect(page, { lines }) {
   const id = lines && lines[0] && lines[0].productId;
   if (!id) throw new Error('lines[0].productId required');
-  const o = await openProduct(page, id);
+  const o = await openProduct(page, id, lines[0].expectSku);
   const saves = await page.evaluate(() => [...document.querySelectorAll('a,button,input[type=submit]')]
     .filter((b) => /save|update/i.test((b.textContent || b.value || '') + ' ' + (b.getAttribute('onclick') || '')))
     .map((b) => ({ tag: b.tagName, text: (b.textContent || b.value || '').trim().slice(0, 40), onclick: (b.getAttribute('onclick') || '').slice(0, 80), id: b.id })).slice(0, 12));
@@ -68,8 +76,9 @@ export async function stage(page, { lines }) {
   if (!Array.isArray(lines) || !lines.length) throw new Error('lines[] required');
   plan = [];
   for (const l of lines) {
-    const o = await openProduct(page, l.productId);
-    if (!o.barcodeField) { plan.push({ productId: l.productId, skip: 'no barcode field found', tried: o.tried }); continue; }
+    if (!l.expectSku) { plan.push({ productId: l.productId, skip: 'expectSku required' }); continue; }
+    const o = await openProduct(page, l.productId, l.expectSku);
+    if (!o.barcodeField) { plan.push({ productId: l.productId, skip: 'page did not show this product (SKU not found) - not touched', tried: o.tried }); continue; }
     const cur = o.barcodeField.value;
     if (!cur) plan.push({ productId: l.productId, skip: 'already blank', url: o.url });
     else if (l.expectBarcode != null && String(l.expectBarcode).replace(/^0+/, '') !== String(cur).replace(/^0+/, '')) plan.push({ productId: l.productId, skip: `barcode is ${cur}, expected ${l.expectBarcode}`, url: o.url });
