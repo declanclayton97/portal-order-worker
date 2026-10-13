@@ -131,6 +131,8 @@ async function runOrderInner({ supplier, ref, lines, opts = {}, execute }) {
     }
     const staged = await mod.stage(page, { lines, creds: { user, pass }, ...opts });
     lastStaged = staged;
+    // bpimport: submit the Data Manager form as a TEST RUN (doit unticked) — BP reports, writes nothing.
+    if (!execute && opts.testRun && mod.testRun) { const tr = await mod.testRun(page); await closeQuietly(browser); return { ok: true, dryRun: true, supplier, ref, ...staged, ...tr, ms: Date.now() - t0 }; }
     if (!execute) { await closeQuietly(browser); return { ok: true, dryRun: true, supplier, ref, ...staged, ms: Date.now() - t0 }; }
     if (!staged.ready) { await closeQuietly(browser); return { ok: false, error: 'not ready to place', supplier, ref, ...staged }; }
     const placed = await mod.place(page, { ref });
