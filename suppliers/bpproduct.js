@@ -38,14 +38,17 @@ async function openProduct(page, id, sku) {
     await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 }).catch(() => {});
     // SKU/barcode/EAN only appear once the "Product info" tab is opened (user, 14 Oct 2026).
     const tab = page.locator('a, li, span, div[role=tab], button').filter({ hasText: /^\s*product info\s*$/i }).first();
-    if (await tab.count().catch(() => 0)) { await tab.click().catch(() => {}); await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {}); await page.waitForTimeout(1500); }
+    let tabHref = null;
+    if (await tab.count().catch(() => 0)) { tabHref = await tab.getAttribute('href').catch(() => null); const oc = await tab.getAttribute('onclick').catch(() => null); tabHref = tabHref + ' | onclick=' + oc;
+      const h = (await tab.getAttribute('href').catch(() => '')) || '';
+      if (h && !h.startsWith('#') && !/^javascript/i.test(h)) await page.goto(new URL(h, page.url()).href, { waitUntil: 'networkidle', timeout: 60000 }).catch(() => {}); else await tab.click().catch(() => {}); await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {}); await page.waitForTimeout(1500); }
     // the editor fills its inputs by script after load; give it time to show a value
     let f = await fields(page);
     for (let i = 0; i < 10 && !f.some((x) => x.value && x.type !== 'hidden'); i++) { await page.waitForTimeout(1000); f = await fields(page); }
     const bc = f.find((x) => /products_barcode|^barcode$/i.test(x.name));
     const isIt = holdsSku(f, sku);
     const tabs = await page.evaluate(() => [...document.querySelectorAll('a,li,span,button')].filter((e) => e.children.length === 0 && /info|detail|identif/i.test(e.textContent) && e.textContent.trim().length < 30).map((e) => e.tagName + ':' + e.textContent.trim() + (e.offsetWidth ? '' : '(hidden)')).slice(0, 15));
-    tried.push({ url, tabs, tabFound: await tab.count().catch(() => -1), title: await page.title(), filled: f.filter((x) => x.value).map((x) => `${x.name}=${x.value}`).slice(0, 8), holdsSku: isIt });
+    tried.push({ url, tabHref, nowAt: page.url(), tabs, tabFound: await tab.count().catch(() => -1), title: await page.title(), filled: f.filter((x) => x.value).map((x) => `${x.name}=${x.value}`).slice(0, 8), holdsSku: isIt });
     if (bc && isIt) return { url, fields: f, barcodeField: bc, tried };
   }
   return { url: null, tried };
