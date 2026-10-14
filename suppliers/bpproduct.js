@@ -36,6 +36,9 @@ async function openProduct(page, id, sku) {
   for (const u of URLS) {
     const url = u(id);
     await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 }).catch(() => {});
+    // SKU/barcode/EAN only appear once the "Product info" tab is opened (user, 14 Oct 2026).
+    const tab = page.locator('a, li, span, div[role=tab], button').filter({ hasText: /^\s*product info\s*$/i }).first();
+    if (await tab.count().catch(() => 0)) { await tab.click().catch(() => {}); await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {}); await page.waitForTimeout(1500); }
     // the editor fills its inputs by script after load; give it time to show a value
     let f = await fields(page);
     for (let i = 0; i < 10 && !f.some((x) => x.value && x.type !== 'hidden'); i++) { await page.waitForTimeout(1000); f = await fields(page); }
