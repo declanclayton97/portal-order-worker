@@ -17,6 +17,7 @@ export const login = bpLogin;
 
 // The legacy product editor. Tried in order until one shows a barcode input.
 const URLS = [
+  (id) => `${config.base}/patt-op.php?scode=product&pID=${id}&action=new_product`,   // the real editor (user, 14 Oct)
   (id) => `${config.base}/patt-op.php?scode=product&pID=${id}`,
   (id) => `${config.base}/patt-op.php?scode=product&product_id=${id}`,
   (id) => `${config.base}/patt-op.php?scode=product&action=edit&pID=${id}`,
