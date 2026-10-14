@@ -70,7 +70,8 @@ export async function inspect(page, { lines }) {
   const saves = await page.evaluate(() => [...document.querySelectorAll('a,button,input[type=submit]')]
     .filter((b) => /save|update/i.test((b.textContent || b.value || '') + ' ' + (b.getAttribute('onclick') || '')))
     .map((b) => ({ tag: b.tagName, text: (b.textContent || b.value || '').trim().slice(0, 40), onclick: (b.getAttribute('onclick') || '').slice(0, 80), id: b.id })).slice(0, 12));
-  return { productId: id, ...o, saves };
+  const shot = 'data:image/png;base64,' + (await page.screenshot({ fullPage: false })).toString('base64');
+  return { productId: id, ...o, saves, shot };
 }
 
 async function clickSave(page) {
