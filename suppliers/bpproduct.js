@@ -44,7 +44,8 @@ async function openProduct(page, id, sku) {
     for (let i = 0; i < 10 && !f.some((x) => x.value && x.type !== 'hidden'); i++) { await page.waitForTimeout(1000); f = await fields(page); }
     const bc = f.find((x) => /products_barcode|^barcode$/i.test(x.name));
     const isIt = holdsSku(f, sku);
-    tried.push({ url, title: await page.title(), filled: f.filter((x) => x.value).map((x) => `${x.name}=${x.value}`).slice(0, 8), holdsSku: isIt });
+    const tabs = await page.evaluate(() => [...document.querySelectorAll('a,li,span,button')].filter((e) => e.children.length === 0 && /info|detail|identif/i.test(e.textContent) && e.textContent.trim().length < 30).map((e) => e.tagName + ':' + e.textContent.trim() + (e.offsetWidth ? '' : '(hidden)')).slice(0, 15));
+    tried.push({ url, tabs, tabFound: await tab.count().catch(() => -1), title: await page.title(), filled: f.filter((x) => x.value).map((x) => `${x.name}=${x.value}`).slice(0, 8), holdsSku: isIt });
     if (bc && isIt) return { url, fields: f, barcodeField: bc, tried };
   }
   return { url: null, tried };
