@@ -37,7 +37,7 @@ async function openProduct(page, id, sku) {
     const url = u(id);
     await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 }).catch(() => {});
     // SKU/barcode/EAN only appear once the "Product info" tab is opened (user, 14 Oct 2026).
-    const tab = page.locator('a, li, span, div[role=tab], button').filter({ hasText: /^\s*product info\s*$/i }).first();
+    const tab = page.getByText('Product info', { exact: true }).locator('visible=true').first();
     let tabHref = null;
     if (await tab.count().catch(() => 0)) { tabHref = await tab.getAttribute('href').catch(() => null); const oc = await tab.getAttribute('onclick').catch(() => null); tabHref = tabHref + ' | onclick=' + oc;
       const h = (await tab.getAttribute('href').catch(() => '')) || '';
