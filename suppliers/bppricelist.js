@@ -18,12 +18,13 @@ export const login = bpLogin;
 const PAGE = () => `${config.base}/report.php?report_type=price_lists`;
 
 async function readRow(page, id) {
-  await page.goto(PAGE(), { waitUntil: 'domcontentloaded' });
-  await page.waitForTimeout(1500);
+  await page.goto(PAGE(), { waitUntil: 'networkidle', timeout: 60000 }).catch(() => {});
+  await page.waitForFunction((id) => document.getElementById(`row_${id}`)
+    || [...document.querySelectorAll('a')].some((a) => (a.getAttribute('onclick') || '').includes(`deleteTableRow(${id})`)), id, { timeout: 15000 }).catch(() => {});
   return page.evaluate((id) => {
     const tr = document.getElementById(`row_${id}`)
       || [...document.querySelectorAll('tr')].find((t) => [...t.querySelectorAll('a')].some((a) => (a.getAttribute('onclick') || '').includes(`deleteTableRow(${id})`)));
-    if (!tr) return null;
+    if (!tr) return { notFound: true, url: location.href, title: document.title, rows: document.querySelectorAll('tr').length, text: document.body.innerText.replace(/\s+/g, ' ').slice(0, 600) };
     const c = [...tr.cells].map((x) => x.innerText.trim());
     return { code: c[0], name: c[1], currency: c[3], isCost: c[4], contactsUsing: c[5], suppliersUsing: c[6] };
   }, id);
@@ -32,7 +33,7 @@ async function readRow(page, id) {
 let pending = null;
 
 function check(row, l) {
-  if (!row) return 'price list row not found on the page';
+  if (!row || row.notFound) return 'price list row not found on the page';
   if (row.name !== l.expectName) return `row is "${row.name}", expected "${l.expectName}"`;
   if (row.contactsUsing || row.suppliersUsing) return `still in use (contacts ${row.contactsUsing || 0}, suppliers ${row.suppliersUsing || 0})`;
   return null;
@@ -62,5 +63,5 @@ export async function place(page) {
     return { status: r.status, body: (await r.text()).slice(0, 300) };
   }, pending.id);
   const after = await readRow(page, pending.id);
-  return { placed: true, deleted: !after, priceListId: pending.id, name: pending.name, resp, rowAfter: after };
+  return { placed: true, deleted: !!(after && after.notFound && after.rows > 5), priceListId: pending.id, name: pending.name, resp, rowAfter: after };
 }
