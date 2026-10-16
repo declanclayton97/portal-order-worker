@@ -24,12 +24,19 @@ export const login = bpLogin;
 const editor = (id) => `${config.base}/patt-op.php?scode=product&pID=${id}&action=new_product`;
 
 async function open(page, id, listId, listCode) {
+  // The editor fills itself by script and is sometimes not there on the first load: one reload.
+  let o = await openOnce(page, id, listId, listCode);
+  if (o.error === 'no price list dropdown') o = await openOnce(page, id, listId, listCode);
+  return o;
+}
+
+async function openOnce(page, id, listId, listCode) {
   await page.goto(editor(id), { waitUntil: 'networkidle', timeout: 60000 }).catch(() => {});
-  await page.waitForFunction(() => document.getElementById('price_group_code') && document.getElementsByName('products_model')[0], null, { timeout: 20000 }).catch(() => {});
+  await page.waitForFunction(() => document.getElementById('price_group_code') && document.getElementsByName('products_model')[0], null, { timeout: 30000 }).catch(() => {});
   return page.evaluate(async ({ listId, listCode }) => {
     const sku = (document.getElementsByName('products_model')[0] || {}).value;
     const sel = document.getElementById('price_group_code');
-    if (!sel) return { sku, error: 'no price list dropdown' };
+    if (!sel) return { sku, error: 'no price list dropdown', url: location.pathname + location.search, title: document.title };
     if (![...sel.options].some((o) => o.value === listCode)) return { sku, error: `dropdown has no ${listCode}` };
     sel.value = listCode;
     if (window.jQuery) window.jQuery(sel).trigger('change'); else sel.dispatchEvent(new Event('change', { bubbles: true }));
