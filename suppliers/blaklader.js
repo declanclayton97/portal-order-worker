@@ -425,11 +425,15 @@ export async function place(page, { ref } = {}) {
   const internalId = (out.json && (out.json.internalOrderId || out.json.internalId)) || null;
   const placed = !!(out.ok && internalId);
   if (!placed) {
-    const detail = (out.json && (out.json.message || (out.json.error && (out.json.error.Message || out.json.error.message)))) || out.text || out.error || '';
+    // Keep the whole JSON body when it has more than a message: a 400 from orders/send carries a
+    // field-validation list ("errors"), and reporting only its "title" ("Bad Request") hid which field
+    // Blaklader refused on 2026-10-16/19 (PO 497134, PO 497536).
+    const msg = out.json && (out.json.message || (out.json.error && (out.json.error.Message || out.json.error.message)));
+    const detail = (out.json && (out.json.errors || !msg) ? JSON.stringify(out.json) : msg) || out.text || out.error || '';
     // Carry what we saw at the cart into the failure. A bare "500 Internal Server Error" with no
     // context is what made this take a day to find; whether the cart was viewed, whether it
     // repriced, and how many lines it held are the facts that would have shortened it.
-    const err = new Error(`orders/send ${out.status}: ${String(detail).slice(0, 400)}`);
+    const err = new Error(`orders/send ${out.status}: ${String(detail).slice(0, 900)}`);
     err.cartView = { passes: viewed.passes, repriced: !!(viewed.cart && viewed.cart.repriced), lineCount: (viewed.cart && viewed.cart.lineCount) || 0, cartUnreadable, witnesses };
     throw err;
   }
