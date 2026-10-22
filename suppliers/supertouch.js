@@ -244,13 +244,16 @@ async function fillCheckout(page, { ref }) {
   }));
   const standard = delivery.filter((d) => /^Standard Delivery/i.test(d.label));
   if (standard.length !== 1) return { filled, delivery, refused: 'standard-delivery-not-found-exactly-once' };
-  await page.locator(`input[name="pay_delivery_option"][value="${standard[0].value}"]`).check({ force: true });
+  // The radios are styled; a plain check() does not move them. Click the row, then set it directly.
+  await page.evaluate((v) => { const r = document.querySelector(`input[name="pay_delivery_option"][value="${v}"]`); if (!r) return; const row = r.closest('tr') || r.parentElement; if (row) row.click(); if (!r.checked) { r.checked = true; window.jQuery ? window.jQuery(r).trigger('click').trigger('change') : r.dispatchEvent(new Event('change', { bubbles: true })); } }, standard[0].value);
+  const deliveryChecked = await page.evaluate((v) => !!(document.querySelector(`input[name="pay_delivery_option"][value="${v}"]`) || {}).checked, standard[0].value);
+  if (!deliveryChecked) return { filled, delivery, refused: 'standard-delivery-would-not-select' };
   await page.waitForTimeout(2500);
   // The section "CONTINUE »" buttons only move between sections of the same page (they place nothing).
   for (const b of await page.locator('button:has-text("CONTINUE »")').all()) { if (await b.isVisible().catch(() => false)) { await b.click().catch(() => {}); await page.waitForTimeout(2500); } }
-  const pay = await page.locator('input[name="pay_method"][value="sb_credit_account"]').check({ force: true }).then(() => true).catch(() => false);
+  const pay = await page.evaluate(() => { const r = document.querySelector('input[name="pay_method"][value="sb_credit_account"]'); if (!r) return false; const row = r.closest('label') || r.parentElement; if (row) row.click(); if (!r.checked) { r.checked = true; window.jQuery && window.jQuery(r).trigger('click').trigger('change'); } return r.checked; }).catch(() => false);
   await page.waitForTimeout(1500);
-  const terms = await page.locator('#agree-terms').check({ force: true }).then(() => true).catch(() => false);
+  const terms = await page.evaluate(() => { const r = document.querySelector('#agree-terms'); if (!r) return false; if (!r.checked) { r.checked = true; window.jQuery && window.jQuery(r).trigger('change'); } return r.checked; }).catch(() => false);
   const state = await page.evaluate(() => {
     const v = (n) => (document.querySelector(`[name="${n}"]`) || {}).value;
     const txt = (document.body.innerText || '').replace(/\s+/g, ' ');
@@ -269,8 +272,22 @@ async function fillCheckout(page, { ref }) {
 // "Continue to Payment".
 export async function checkoutRehearsal(page, { ref = 'REHEARSAL' } = {}) {
   if (!page.__supertouchStaged) return { stageDetail: null, refused: 'stage did not stage (basket not empty?) - checkout not touched' };
-  const co = await fillCheckout(page, { ref });
-  const shot = await page.screenshot({ fullPage: true, type: 'jpeg', quality: 55 }).then((b) => `data:image/jpeg;base64,${b.toString('base64')}`).catch(() => null);
-  const emptied = page.__supertouchStaged ? await emptyBasket(page) : { skipped: true };
-  return { stageDetail: page.__supertouchStage || null, checkout: co, shot, emptied };
+  let co, err = null, shot = null;
+  try { co = await fillCheckout(page, { ref }); } catch (e) { err = String(e.message || e).slice(0, 600); }
+  shot = await page.screenshot({ fullPage: true, type: 'jpeg', quality: 55 }).then((b) => `data:image/jpeg;base64,${b.toString('base64')}`).catch(() => null);
+  const emptied = await emptyBasket(page);
+  return { stageDetail: page.__supertouchStage || null, checkout: co || null, fillError: err, shot, emptied };
+}
+
+// One-off clean-up after a failed rehearsal: empties the basket ONLY if it holds exactly the lines given
+// (count, subtotal and codes all match), so a staff member's basket can never be cleared by this.
+export async function clearOurRehearsal(page, { expect = [], subtotal = null } = {}) {
+  const b = await basketState(page);
+  const body = await page.evaluate(() => (document.body.innerText || '').replace(/s+/g, ' '));
+  const units = expect.reduce((n, l) => n + Number(l.qty || 0), 0);
+  const codesOk = expect.every((l) => body.includes(`Code: ${l.code}`) || body.includes(l.code));
+  const match = b.items === units && (subtotal == null || Math.abs((b.subtotal || 0) - subtotal) < 0.005) && codesOk;
+  if (!match) return { cleared: false, reason: 'basket does not hold exactly our rehearsal lines - left alone', items: b.items, subtotal: b.subtotal };
+  const e = await emptyBasket(page);
+  return { cleared: e.empty, after: e };
 }

@@ -109,6 +109,8 @@ async function runOrderInner({ supplier, ref, lines, opts = {}, execute }) {
     // Log in and hand back the portal's session token (beeswift: one session per account, so the
     // run logs in seconds before its basket instead of trusting a token a staff login may have killed).
     if (opts.sessionToken && mod.sessionToken) { const st = await mod.sessionToken(page); await closeQuietly(browser); return { ok: true, sessionToken: true, supplier, ref, ...st, ms: Date.now() - t0 }; }
+    // Supertouch: empty the basket only if it holds exactly the given rehearsal lines (after a failed rehearsal).
+    if (opts.clearRehearsal && mod.clearOurRehearsal) { const cr = await mod.clearOurRehearsal(page, { expect: lines.map((l) => ({ code: l.stockCode || l.sku, qty: l.qty })), subtotal: opts.subtotal == null ? null : Number(opts.subtotal) }); await closeQuietly(browser); return { ok: true, clearRehearsal: true, supplier, ref, ...cr, ms: Date.now() - t0 }; }
     // Read-only page map (supertouch): which forms/inputs the order flow will need. Touches nothing.
     if (opts.explore && mod.explore) { const ex = await mod.explore(page, { codes: lines.map((l) => l.stockCode || l.sku).filter(Boolean) }); await closeQuietly(browser); return { ok: true, explore: true, supplier, ref, ...ex, ms: Date.now() - t0 }; }
     if (opts.inspect && mod.inspect) { const insp = await mod.inspect(page, { lines, creds: { user, pass } }); await closeQuietly(browser); return { ok: true, inspect: true, supplier, ref, ...insp, ms: Date.now() - t0 }; }
