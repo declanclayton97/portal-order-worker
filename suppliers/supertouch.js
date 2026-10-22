@@ -31,6 +31,14 @@ async function loggedIn(page) {
 
 export async function login(page, { user, pass }) {
   await page.goto(`${BASE}/login`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  // The cookie banner covers the Login button. Answer it the privacy-preserving way: "Let me choose",
+  // leave the optional boxes unticked (only strictly-necessary is pre-ticked), "Confirm my choices".
+  if (await page.locator('#let-me-choose').isVisible().catch(() => false)) {
+    await page.click('#let-me-choose').catch(() => {});
+    for (const n of ['performance_and_analytics', 'functional', 'advertising']) await page.uncheck(`input.cookie-checkbox[name="${n}"]`).catch(() => {});
+    await page.click('#cookie-confirm-choices').catch(() => {});
+    await page.locator('.cookie-pop-up-wrapper').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+  }
   await page.check('#returning_customer').catch(() => {});
   await page.fill('#customerEmail', user);
   await page.fill('#customerPassword', pass);
