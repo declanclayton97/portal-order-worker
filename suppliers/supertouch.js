@@ -200,7 +200,9 @@ export async function stage(page, { lines = [], skipInvalid = false } = {}) {
   const skippedCodes = new Set((add.skipped || []).map((x) => x.code));
   const expectUnits = want.filter((l) => !skippedCodes.has(l.code)).reduce((n, l) => n + l.qty, 0);
   const ready = after.items === expectUnits && expectUnits > 0;
-  return { ready, want, skipped: add.skipped || [], expectUnits, basket: { items: after.items, subtotal: after.subtotal }, add };
+  // Not what we asked for: empty it now (it was empty when we started, so everything in it is ours).
+  const emptiedOnMismatch = ready ? null : await emptyBasket(page).catch((e) => ({ error: String(e.message || e) }));
+  return { ready, emptiedOnMismatch, want, skipped: add.skipped || [], expectUnits, basket: { items: after.items, subtotal: after.subtotal }, add };
 }
 
 // Rehearsal only: open the checkout page, record its fields, submit NOTHING.
