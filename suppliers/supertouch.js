@@ -83,7 +83,7 @@ export async function inspect(page) {
   return { landed, tools, pageSaid: await text(page, 500) };
 }
 
-export async function stage() { throw new Error('supertouch worker module is a login probe only — basket/checkout not built yet'); }
+
 export async function place() { throw new Error('supertouch worker module is a login probe only'); }
 
 // opts.explore — READ-ONLY map of the pages the order flow will need: the Quick Order control, the
@@ -117,4 +117,91 @@ export async function explore(page, { codes = [] } = {}) {
   await page.goto(`${BASE}/account/pages/sales-orders`, { waitUntil: 'domcontentloaded', timeout: 60000 }); await page.waitForTimeout(3000);
   out.push(await grab('sales-orders'));
   return { pages: out };
+}
+
+// ── Basket (Quick Order = the bulk-add form: rows of identifier[] + quantity[]) ─────────────────
+// SAFETY: the basket belongs to the account, and staff use the same login. stage() refuses to touch a
+// basket that already holds anything, so "empty the basket" afterwards can only ever remove our lines.
+async function basketState(page) {
+  await page.goto(`${BASE}/basket`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForTimeout(2500);
+  return page.evaluate(() => {
+    const txt = (document.body.innerText || '').replace(/\s+/g, ' ');
+    const m = txt.match(/Your Basket\s+(\d+)\s+Items?/i);
+    const rows = [...document.querySelectorAll('tr, .basket-item, [class*="basket-row" i], [class*="basket__item" i]')]
+      .map((r) => (r.innerText || '').replace(/\s+/g, ' ').trim()).filter((t) => t && /£/.test(t)).slice(0, 60);
+    const money = (re) => { const x = txt.match(re); return x ? Number(x[1].replace(/,/g, '')) : null; };
+    return {
+      items: m ? Number(m[1]) : null, empty: /Your basket is empty/i.test(txt), rows,
+      subtotal: money(/Subtotal\s+£([\d,.]+)/i), delivery: money(/Delivery\s+£([\d,.]+)/i), total: money(/Total\s+£([\d,.]+)/i),
+      html: (document.querySelector('form') ? '' : '') + ([...document.querySelectorAll('table')].map((t) => t.outerHTML.replace(/\s+/g, ' ')).join('\n').slice(0, 6000)),
+    };
+  });
+}
+
+async function quickAdd(page, lines) {
+  const form = page.locator('form.bulk-add-to-basket').first();
+  await form.waitFor({ state: 'attached', timeout: 15000 });
+  // The form may be inside a hidden Quick Order panel; drive its fields directly by index.
+  for (let i = 0; i < lines.length; i++) {
+    let rows = await form.locator('input[name="identifier[]"]').count();
+    while (rows <= i) { await form.locator('button.add-new-row').first().evaluate((b) => b.click()); await page.waitForTimeout(150); rows = await form.locator('input[name="identifier[]"]').count(); }
+    await form.locator('input[name="identifier[]"]').nth(i).evaluate((el, v) => { el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }, String(lines[i].code));
+    await form.locator('input[name="quantity[]"]').nth(i).evaluate((el, v) => { el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }, String(lines[i].qty));
+  }
+  const responses = [];
+  const onResp = async (r) => { if (/basket|bulk/i.test(r.url()) && r.request().method() !== 'GET') responses.push({ url: r.url(), status: r.status(), body: (await r.text().catch(() => '')).slice(0, 800) }); };
+  page.on('response', onResp);
+  await form.locator('button.bulk-add-to-basket-submit').first().evaluate((b) => b.click());
+  await page.waitForTimeout(6000);
+  page.off('response', onResp);
+  return { responses, pageSaid: await text(page, 600) };
+}
+
+// lines: [{ stockCode|sku, qty }]. Rehearsal-safe: adds to the basket only; checkout is place().
+export async function stage(page, { lines = [] } = {}) {
+  const want = lines.map((l) => ({ code: String(l.stockCode || l.sku || '').trim(), qty: Number(l.qty || l.quantity || 0) })).filter((l) => l.code && l.qty > 0);
+  if (!want.length) throw new Error('no lines with a code and a quantity');
+  const before = await basketState(page);
+  if (!(before.empty || before.items === 0)) {
+    return { ready: false, refused: 'basket-not-empty', note: 'The Supertouch basket already holds items (a staff member may be mid-order). Not touching it.', before: { items: before.items, rows: before.rows } };
+  }
+  const add = await quickAdd(page, want);
+  const after = await basketState(page);
+  page.__supertouchStaged = true;
+  return { ready: false, want, add, basket: after };
+}
+
+// Rehearsal only: open the checkout page, record its fields, submit NOTHING.
+export async function checkoutProbe(page) {
+  await page.goto(`${BASE}/basket`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForTimeout(2000);
+  await page.locator('a:has-text("Continue to checkout"), button:has-text("Continue to checkout")').first().click({ timeout: 15000 }).catch(() => {});
+  await page.waitForLoadState('domcontentloaded', { timeout: 45000 }).catch(() => {});
+  await page.waitForTimeout(4000);
+  const checkout = await page.evaluate(() => ({
+    url: location.href,
+    fields: [...document.querySelectorAll('input,select,textarea,button')].filter((i) => i.type !== 'hidden' || /po|ref|order/i.test(i.name || ''))
+      .map((i) => `${i.tagName.toLowerCase()} name=${i.name || ''} id=${i.id || ''} type=${i.type || ''} val=${(i.value || '').slice(0, 40)} txt=${(i.innerText || '').trim().slice(0, 30)}`)
+      .filter((s) => !/newsletter|search|Request-an-Account|cookie|g-recaptcha/i.test(s)).slice(0, 80),
+    text: (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 2500),
+  })).catch((e) => ({ error: String(e.message || e) }));
+  const emptied = await emptyBasket(page);
+  return { checkout, emptied };
+}
+
+// Only ever called on a basket stage() found empty, so everything in it is ours.
+async function emptyBasket(page) {
+  await page.goto(`${BASE}/basket`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForTimeout(2000);
+  const accept = (d) => d.accept().catch(() => {});
+  page.on('dialog', accept);
+  await page.locator('button[name="empty_basket"]').first().click({ timeout: 10000 }).catch(() => {});
+  await page.waitForTimeout(2500);
+  // Some themes confirm in a modal rather than window.confirm.
+  await page.locator('.modal.in button:has-text("Yes"), .modal.in button:has-text("Empty"), .modal.in button:has-text("Confirm"), .swal2-confirm').first().click({ timeout: 3000 }).catch(() => {});
+  await page.waitForTimeout(2500);
+  page.off('dialog', accept);
+  const s = await basketState(page);
+  return { empty: s.empty || s.items === 0, items: s.items };
 }
