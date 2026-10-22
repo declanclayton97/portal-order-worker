@@ -250,7 +250,20 @@ async function fillCheckout(page, { ref }) {
   if (!deliveryChecked) return { filled, delivery, refused: 'standard-delivery-would-not-select' };
   await page.waitForTimeout(2500);
   // The section "CONTINUE »" buttons only move between sections of the same page (they place nothing).
-  for (const b of await page.locator('button:has-text("CONTINUE »")').all()) { if (await b.isVisible().catch(() => false)) { await b.click().catch(() => {}); await page.waitForTimeout(2500); } }
+  // Click the delivery section's one (inside the form column, not the order-summary sidebar), then record
+  // what a person would SEE: visible error messages and whether Payment opened.
+  const continued = [];
+  for (const b of await page.locator('button:has-text("CONTINUE »")').all()) {
+    if (!(await b.isVisible().catch(() => false))) continue;
+    const box = await b.boundingBox().catch(() => null);
+    await b.scrollIntoViewIfNeeded().catch(() => {});
+    await b.click({ timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(3000);
+    continued.push({ x: box && Math.round(box.x), y: box && Math.round(box.y) });
+  }
+  const visibleErrors = await page.evaluate(() => [...document.querySelectorAll('.has-error, .error, .alert-danger, .help-block, .invalid-feedback, [class*="error" i]')]
+    .filter((e) => e.offsetParent !== null && (e.innerText || '').trim()).map((e) => (e.innerText || '').trim().slice(0, 120)).slice(0, 15));
+  const paymentOpen = await page.evaluate(() => { const r = document.querySelector('input[name="pay_method"]'); return !!(r && (r.offsetParent !== null || (r.closest('label') && r.closest('label').offsetParent !== null))); });
   const pay = await page.evaluate(() => { const r = document.querySelector('input[name="pay_method"][value="sb_credit_account"]'); if (!r) return false; const row = r.closest('label') || r.parentElement; if (row) row.click(); if (!r.checked) { r.checked = true; window.jQuery && window.jQuery(r).trigger('click').trigger('change'); } return r.checked; }).catch(() => false);
   await page.waitForTimeout(1500);
   const terms = await page.evaluate(() => { const r = document.querySelector('#agree-terms'); if (!r) return false; if (!r.checked) { r.checked = true; window.jQuery && window.jQuery(r).trigger('change'); } return r.checked; }).catch(() => false);
@@ -265,7 +278,7 @@ async function fillCheckout(page, { ref }) {
       errors: [...document.querySelectorAll('.has-error, .error, .alert-danger, .help-block')].map((e) => (e.innerText || '').trim()).filter(Boolean).slice(0, 10),
     };
   });
-  return { filled, delivery, chosenDelivery: standard[0], creditAccount: pay, terms, state };
+  return { filled, delivery, chosenDelivery: standard[0], continued, visibleErrors, paymentOpen, creditAccount: pay, terms, state };
 }
 
 // Rehearsal: stage → fill the whole checkout → screenshot → empty our basket. Never clicks
