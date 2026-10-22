@@ -169,6 +169,7 @@ export async function stage(page, { lines = [] } = {}) {
   const add = await quickAdd(page, want);
   const after = await basketState(page);
   page.__supertouchStaged = true;
+  page.__supertouchStage = { want, add, basket: after };
   return { ready: false, want, add, basket: after };
 }
 
@@ -188,7 +189,7 @@ export async function checkoutProbe(page) {
   })).catch((e) => ({ error: String(e.message || e) }));
   // Only empty a basket this run staged into (stage() refuses a basket that was not empty).
   const emptied = page.__supertouchStaged ? await emptyBasket(page) : { skipped: "stage did not run, basket left as found" };
-  return { checkout, emptied };
+  return { stageDetail: page.__supertouchStage || null, checkout, emptied };
 }
 
 // Only ever called on a basket stage() found empty, so everything in it is ours.
