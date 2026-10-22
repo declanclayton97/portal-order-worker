@@ -190,23 +190,7 @@ export async function stage(page, { lines = [] } = {}) {
 }
 
 // Rehearsal only: open the checkout page, record its fields, submit NOTHING.
-export async function checkoutProbe(page) {
-  await page.goto(`${BASE}/basket`, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForTimeout(2000);
-  await page.locator('a:has-text("Continue to checkout"), button:has-text("Continue to checkout")').first().click({ timeout: 15000 }).catch(() => {});
-  await page.waitForLoadState('domcontentloaded', { timeout: 45000 }).catch(() => {});
-  await page.waitForTimeout(4000);
-  const checkout = await page.evaluate(() => ({
-    url: location.href,
-    fields: [...document.querySelectorAll('input,select,textarea,button')].filter((i) => i.type !== 'hidden' || /po|ref|order/i.test(i.name || ''))
-      .map((i) => `${i.tagName.toLowerCase()} name=${i.name || ''} id=${i.id || ''} type=${i.type || ''} val=${(i.value || '').slice(0, 40)} txt=${(i.innerText || '').trim().slice(0, 30)}`)
-      .filter((s) => !/newsletter|search|Request-an-Account|cookie|g-recaptcha/i.test(s)).slice(0, 80),
-    text: (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 2500),
-  })).catch((e) => ({ error: String(e.message || e) }));
-  // Only empty a basket this run staged into (stage() refuses a basket that was not empty).
-  const emptied = page.__supertouchStaged ? await emptyBasket(page) : { skipped: "stage did not run, basket left as found" };
-  return { stageDetail: page.__supertouchStage || null, checkout, emptied };
-}
+export async function checkoutProbe(page, opts = {}) { return checkoutRehearsal(page, { ref: (opts && opts.ref) || 'REHEARSAL' }); }
 
 // Only ever called on a basket stage() found empty, so everything in it is ours.
 async function emptyBasket(page) {
@@ -222,4 +206,63 @@ async function emptyBasket(page) {
   page.off('dialog', accept);
   const s = await basketState(page);
   return { empty: s.empty || s.items === 0, items: s.items };
+}
+
+// ── Checkout ───────────────────────────────────────────────────────────────────────────────────
+// Deliver to our CURRENT address, typed in. The only saved address on the account (4 Midland,
+// LS26 8SW) is our OLD one (Dec, 22 Oct 2026) and must never be selected.
+const DELIVERY = {
+  delivery_firstname: 'Tuff', delivery_lastname: 'Workwear', delivery_company: 'Tuff Workwear Ltd',
+  delivery_address_1: '144-146 Aberford Road', delivery_address_2: 'Woodlesford', delivery_city: 'Leeds',
+  delivery_area: 'West Yorkshire', delivery_postcode: 'LS26 8LG',
+};
+
+// Fill everything up to (not including) "Continue to Payment". Returns what the page shows.
+async function fillCheckout(page, { ref }) {
+  await page.goto(`${BASE}/basket`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForTimeout(2000);
+  await page.locator('a:has-text("Continue to checkout"), button:has-text("Continue to checkout")').first().click({ timeout: 15000 });
+  await page.waitForURL(/\/pay/, { timeout: 45000 });
+  await page.waitForTimeout(3000);
+  const set = (name, v) => page.evaluate(({ name, v }) => {
+    const el = document.querySelector(`[name="${name}"]`); if (!el) return false;
+    el.value = v; window.jQuery ? window.jQuery(el).trigger('input').trigger('change') : el.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  }, { name, v });
+  const filled = {};
+  // Never the saved (old) address: leave the dropdown on "Select Address" and type ours.
+  await page.evaluate(() => { const s = document.querySelector('select[name="delivery_addresses"]'); if (s) { s.value = ''; window.jQuery && window.jQuery(s).trigger('change'); } });
+  await page.waitForTimeout(800);
+  filled.country = await page.selectOption('select[name="delivery_country"]', 'GB').then(() => true).catch(() => false);
+  for (const [k, v] of Object.entries(DELIVERY)) filled[k] = await set(k, v);
+  filled.po = await set('custom_fields[cf_po_number]', String(ref));
+  // Step "CONTINUE »" buttons only move between sections of the same page.
+  for (const b of await page.locator('button:has-text("CONTINUE »")').all()) { if (await b.isVisible().catch(() => false)) { await b.click().catch(() => {}); await page.waitForTimeout(2500); } }
+  const delivery = await page.evaluate(() => [...document.querySelectorAll('input[name="pay_delivery_option"]')].map((r) => {
+    const lab = r.closest('label') || document.querySelector(`label[for="${r.id}"]`) || r.parentElement;
+    return { value: r.value, checked: r.checked, label: ((lab && lab.innerText) || '').replace(/\s+/g, ' ').trim().slice(0, 120) };
+  }));
+  const pay = await page.locator('input[name="pay_method"][value="sb_credit_account"]').check({ force: true }).then(() => true).catch(() => false);
+  const state = await page.evaluate(() => {
+    const v = (n) => (document.querySelector(`[name="${n}"]`) || {}).value;
+    const txt = (document.body.innerText || '').replace(/\s+/g, ' ');
+    const money = (re) => { const x = txt.match(re); return x ? Number(x[1].replace(/,/g, '')) : null; };
+    return {
+      po: v('custom_fields[cf_po_number]'), postcode: v('delivery_postcode'), address1: v('delivery_address_1'), savedAddress: v('delivery_addresses'),
+      payMethod: (document.querySelector('input[name="pay_method"]:checked') || {}).value || null,
+      subtotal: money(/Subtotal\s+£([\d,.]+)/i), delivery: money(/Delivery\s+£([\d,.]+)/i), vat: money(/VAT\s+£([\d,.]+)/i), total: money(/Total\s+£([\d,.]+)/i),
+      errors: [...document.querySelectorAll('.has-error, .error, .alert-danger, .help-block')].map((e) => (e.innerText || '').trim()).filter(Boolean).slice(0, 10),
+    };
+  });
+  return { filled, delivery, creditAccount: pay, state };
+}
+
+// Rehearsal: stage → fill the whole checkout → screenshot → empty our basket. Never clicks
+// "Continue to Payment".
+export async function checkoutRehearsal(page, { ref = 'REHEARSAL' } = {}) {
+  if (!page.__supertouchStaged) return { stageDetail: null, refused: 'stage did not stage (basket not empty?) - checkout not touched' };
+  const co = await fillCheckout(page, { ref });
+  const shot = await page.screenshot({ fullPage: true, type: 'jpeg', quality: 55 }).then((b) => `data:image/jpeg;base64,${b.toString('base64')}`).catch(() => null);
+  const emptied = page.__supertouchStaged ? await emptyBasket(page) : { skipped: true };
+  return { stageDetail: page.__supertouchStage || null, checkout: co, shot, emptied };
 }
