@@ -247,13 +247,16 @@ async function fillCheckout(page, { ref }) {
   const standard = delivery.filter((d) => /^Standard Delivery/i.test(d.label));
   if (standard.length !== 1) return { filled, delivery, refused: 'standard-delivery-not-found-exactly-once' };
   // The radios are styled; a plain check() does not move them. Click the row, then set it directly.
-  await page.locator(`input[name="pay_delivery_option"][value="${standard[0].value}"]`).scrollIntoViewIfNeeded().catch(() => {});
-  await page.getByText(/^Standard Delivery/).first().click({ timeout: 5000 }).catch(() => {});
-  await page.waitForTimeout(1500);
-  if (!(await page.evaluate((v) => !!(document.querySelector(`input[name="pay_delivery_option"][value="${v}"]`) || {}).checked, standard[0].value))) {
-    await page.locator(`input[name="pay_delivery_option"][value="${standard[0].value}"]`).click({ force: true, timeout: 5000 }).catch(() => {});
-    await page.waitForTimeout(1500);
-  }
+  // The site's pay bundle binds clicks on .pay-delivery-option-row; that posts delivery.set and, on
+  // success, enables the CONTINUE buttons. Let the address save settle first (it re-renders the rows).
+  await page.waitForTimeout(3500);
+  const rowSel = `.pay-delivery-option-row:has(input[name="pay_delivery_option"][value="${standard[0].value}"])`;
+  const setResp = page.waitForResponse((r) => /delivery/i.test(r.url()) && r.request().method() === 'POST', { timeout: 15000 }).catch(() => null);
+  await page.locator(rowSel).first().scrollIntoViewIfNeeded().catch(() => {});
+  await page.locator(rowSel).first().click({ timeout: 8000 }).catch(() => {});
+  const resp = await setResp;
+  await page.waitForTimeout(2000);
+  const deliverySet = resp ? { url: new URL(resp.url()).pathname, status: resp.status() } : null;
   const deliveryChecked = await page.evaluate((v) => !!(document.querySelector(`input[name="pay_delivery_option"][value="${v}"]`) || {}).checked, standard[0].value);
   if (!deliveryChecked) return { filled, delivery, refused: 'standard-delivery-would-not-select' };
   await page.waitForTimeout(2500);
@@ -294,7 +297,7 @@ async function fillCheckout(page, { ref }) {
       errors: [...document.querySelectorAll('.has-error, .error, .alert-danger, .help-block')].map((e) => (e.innerText || '').trim()).filter(Boolean).slice(0, 10),
     };
   });
-  return { filled, delivery, chosenDelivery: standard[0], validator, buttonsBefore, continued, visibleErrors, paymentOpen, creditAccount: pay, terms, state };
+  return { filled, delivery, chosenDelivery: standard[0], deliverySet, validator, buttonsBefore, continued, visibleErrors, paymentOpen, creditAccount: pay, terms, state };
 }
 
 // Rehearsal: stage → fill the whole checkout → screenshot → empty our basket. Never clicks
