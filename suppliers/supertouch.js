@@ -186,7 +186,8 @@ export async function checkoutProbe(page) {
       .filter((s) => !/newsletter|search|Request-an-Account|cookie|g-recaptcha/i.test(s)).slice(0, 80),
     text: (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 2500),
   })).catch((e) => ({ error: String(e.message || e) }));
-  const emptied = await emptyBasket(page);
+  // Only empty a basket this run staged into (stage() refuses a basket that was not empty).
+  const emptied = page.__supertouchStaged ? await emptyBasket(page) : { skipped: "stage did not run, basket left as found" };
   return { checkout, emptied };
 }
 
