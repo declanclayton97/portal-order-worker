@@ -84,7 +84,6 @@ export async function inspect(page) {
 }
 
 
-export async function place() { throw new Error('supertouch worker module is a login probe only'); }
 
 // opts.explore — READ-ONLY map of the pages the order flow will need: the Quick Order control, the
 // basket, a search for one code, and the Sales Orders list. Returns trimmed form/input/button markup.
@@ -139,7 +138,7 @@ async function basketState(page) {
   });
 }
 
-async function quickAdd(page, lines) {
+async function quickAdd(page, lines, opts = {}) {
   const form = page.locator('form.bulk-add-to-basket').first();
   await form.waitFor({ state: 'attached', timeout: 15000 });
   const block = page.locator('.bulk-add-to-basket-row');
@@ -164,29 +163,44 @@ async function quickAdd(page, lines) {
     await page.waitForTimeout(500);
   }
   const notValid = status.filter((x) => !x.valid);
-  if (notValid.length) return { submitted: false, status, refused: 'rows-not-valid' };
+  let skipped = [];
+  if (notValid.length) {
+    if (!opts.skipInvalid) return { submitted: false, status, refused: 'rows-not-valid' };
+    // Remove the rejected rows (their reason is in status[].msg), keep the valid ones.
+    skipped = notValid.map((x) => ({ code: x.code, reason: x.msg || 'not accepted by Supertouch (no stock / not found)' }));
+    for (const x of notValid) {
+      await page.evaluate((code) => { const r = [...document.querySelectorAll('form.bulk-add-to-basket .bulk-add-to-basket-row')].find((row) => ((row.querySelector('input[name="identifier[]"]') || {}).value || '') === code); const b = r && r.querySelector('button.remove-row'); if (b) b.click(); else if (r) r.remove(); }, x.code);
+      await page.waitForTimeout(300);
+    }
+    if (!status.some((x) => x.valid)) return { submitted: false, status, skipped, refused: 'no-valid-rows' };
+  }
   const responses = [];
   const onResp = async (r) => { if (/bulk_add_to_basket/i.test(r.url())) responses.push({ url: r.url(), status: r.status(), body: (await r.text().catch(() => '')).slice(0, 800) }); };
   page.on('response', onResp);
   await form.evaluate((f) => window.jQuery(f).trigger('submit'));
   await page.waitForTimeout(6000);
   page.off('response', onResp);
-  return { submitted: true, status, responses };
+  return { submitted: true, status, skipped, responses };
 }
 
 // lines: [{ stockCode|sku, qty }]. Rehearsal-safe: adds to the basket only; checkout is place().
-export async function stage(page, { lines = [] } = {}) {
+export async function stage(page, { lines = [], skipInvalid = false } = {}) {
   const want = lines.map((l) => ({ code: String(l.stockCode || l.sku || '').trim(), qty: Number(l.qty || l.quantity || 0) })).filter((l) => l.code && l.qty > 0);
   if (!want.length) throw new Error('no lines with a code and a quantity');
   const before = await basketState(page);
   if (!(before.empty || before.items === 0)) {
     return { ready: false, refused: 'basket-not-empty', note: 'The Supertouch basket already holds items (a staff member may be mid-order). Not touching it.', before: { items: before.items, rows: before.rows } };
   }
-  const add = await quickAdd(page, want);
+  const add = await quickAdd(page, want, { skipInvalid });
+  if (!add.submitted) return { ready: false, want, add, refused: add.refused };
   const after = await basketState(page);
   page.__supertouchStaged = true;
   page.__supertouchStage = { want, add, basket: after };
-  return { ready: false, want, add, basket: after };
+  // Ready only if the basket now holds exactly the units we sent minus the skipped lines.
+  const skippedCodes = new Set((add.skipped || []).map((x) => x.code));
+  const expectUnits = want.filter((l) => !skippedCodes.has(l.code)).reduce((n, l) => n + l.qty, 0);
+  const ready = after.items === expectUnits && expectUnits > 0;
+  return { ready, want, skipped: add.skipped || [], expectUnits, basket: { items: after.items, subtotal: after.subtotal }, add };
 }
 
 // Rehearsal only: open the checkout page, record its fields, submit NOTHING.
@@ -322,4 +336,58 @@ export async function clearOurRehearsal(page, { expect = [], subtotal = null } =
   if (!match) return { cleared: false, reason: 'basket does not hold exactly our rehearsal lines - left alone', items: b.items, subtotal: b.subtotal };
   const e = await emptyBasket(page);
   return { cleared: e.empty, after: e };
+}
+
+// ── Place (execute:true only) ───────────────────────────────────────────────────────────────────
+// Fills the checkout, re-verifies every value, then clicks "Continue to Payment" EXACTLY ONCE. The
+// account pays by credit account, so that click is the order. Never retried here: a caller must
+// check ordersList for our ref before any second attempt.
+export async function place(page, { ref } = {}) {
+  if (!ref) throw new Error('place needs our PO number as ref');
+  const co = await fillCheckout(page, { ref });
+  const st = co.state || {};
+  const problems = [];
+  if (co.refused) problems.push(co.refused);
+  if (st.po !== String(ref)) problems.push(`PO field reads "${st.po}"`);
+  if (st.postcode !== 'LS26 8LG' || st.address1 !== '144-146 Aberford Road') problems.push(`delivery address reads "${st.address1} ${st.postcode}"`);
+  if (st.payMethod !== 'sb_credit_account') problems.push(`pay method "${st.payMethod}"`);
+  if (!co.chosenDelivery || !/^Standard Delivery/i.test(co.chosenDelivery.label)) problems.push('delivery is not Standard Delivery');
+  if (!co.paymentOpen) problems.push('payment section did not open');
+  if (!co.terms) problems.push('terms box not ticked');
+  if (problems.length) {
+    await emptyBasket(page).catch(() => {});
+    return { placed: false, refused: 'checkout-check-failed', problems, checkout: co };
+  }
+  const btn = page.locator('button:has-text("Continue to Payment")').filter({ hasNot: page.locator('[disabled]') });
+  const visible = [];
+  for (const b of await btn.all()) if (await b.isVisible().catch(() => false)) visible.push(b);
+  if (!visible.length) { await emptyBasket(page).catch(() => {}); return { placed: false, refused: 'no-enabled-continue-to-payment', checkout: co }; }
+  await visible[0].click({ timeout: 10000 });
+  await page.waitForURL(/thank|complete|success|confirmation/i, { timeout: 90000 }).catch(() => {});
+  await page.waitForTimeout(3000);
+  const after = await page.evaluate(() => ({ url: location.href, text: (document.body.innerText || '').replace(/s+/g, ' ').slice(0, 2500) }));
+  const m = after.text.match(/orders*(?:number|no.?|ref(?:erence)?|#)s*[:#]?s*([A-Z0-9][A-Z0-9-]{3,})/i);
+  const thanked = /thank you/i.test(after.text) && /thank|complete|success|confirmation/i.test(after.url);
+  const shot = await page.screenshot({ fullPage: true, type: 'jpeg', quality: 55 }).then((b) => `data:image/jpeg;base64,${b.toString('base64')}`).catch(() => null);
+  let listed = null;
+  try { listed = await ordersList(page, { ref }); } catch (e) { listed = { error: String(e.message || e) }; }
+  const orderRef = (m && m[1]) || (listed && listed.matches && listed.matches[0] && listed.matches[0].ourRef) || null;
+  return { placed: !!(thanked || (listed && listed.matches && listed.matches.length)), orderRef, thanked, after: { url: after.url, text: after.text.slice(0, 800) }, listed, shot, checkout: { chosenDelivery: co.chosenDelivery, state: st } };
+}
+
+// Sales Orders: rows whose "Your Ref" is our PO. The table is drawn by script after load.
+export async function ordersList(page, { ref = null } = {}) {
+  await page.goto(`${BASE}/account/pages/sales-orders`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForFunction(() => document.querySelectorAll('table tbody tr').length > 0 || /no orders/i.test(document.body.innerText || ''), null, { timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(1500);
+  const rows = await page.evaluate(() => {
+    const t = [...document.querySelectorAll('table')].find((x) => /Your Ref/i.test(x.innerText || ''));
+    if (!t) return [];
+    const head = [...t.querySelectorAll('thead th, tr:first-child th')].map((h) => (h.innerText || '').trim());
+    return [...t.querySelectorAll('tbody tr')].map((tr) => { const c = [...tr.querySelectorAll('td')].map((td) => (td.innerText || '').trim()); const o = {}; head.forEach((h, i) => { o[h] = c[i]; }); return o; }).slice(0, 40);
+  });
+  const pick = (o, re) => { const k = Object.keys(o).find((x) => re.test(x)); return k ? o[k] : null; };
+  const norm = rows.map((o) => ({ ourRef: pick(o, /Our Ref/i), date: pick(o, /Date/i), yourRef: pick(o, /Your Ref/i), status: pick(o, /Status/i), net: pick(o, /NET/i) }));
+  const matches = ref ? norm.filter((r) => String(r.yourRef || '').trim().toUpperCase() === String(ref).trim().toUpperCase()) : [];
+  return { rows: norm.slice(0, 15), matches };
 }
