@@ -85,3 +85,36 @@ export async function inspect(page) {
 
 export async function stage() { throw new Error('supertouch worker module is a login probe only — basket/checkout not built yet'); }
 export async function place() { throw new Error('supertouch worker module is a login probe only'); }
+
+// opts.explore — READ-ONLY map of the pages the order flow will need: the Quick Order control, the
+// basket, a search for one code, and the Sales Orders list. Returns trimmed form/input/button markup.
+// Adds nothing to the basket and submits no form.
+export async function explore(page, { codes = [] } = {}) {
+  const grab = async (label) => page.evaluate((label) => {
+    const pick = (sel, n) => [...document.querySelectorAll(sel)].slice(0, n).map((e) => e.outerHTML.replace(/\s+/g, ' ').slice(0, 400));
+    return {
+      label, url: location.href, title: document.title,
+      forms: [...document.querySelectorAll('form')].map((f) => ({ id: f.id, action: f.getAttribute('action'), method: f.method, cls: f.className.slice(0, 80),
+        inputs: [...f.querySelectorAll('input,select,textarea,button')].slice(0, 25).map((i) => `${i.tagName.toLowerCase()} name=${i.name || ''} id=${i.id || ''} type=${i.type || ''} cls=${(i.className || '').slice(0, 50)} val=${(i.value || '').slice(0, 30)}`) })).slice(0, 12),
+      quick: pick('[class*="quick" i], [id*="quick" i], [data-target*="quick" i]', 8),
+      text: (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 1200),
+    };
+  }, label).catch((e) => ({ label, error: String(e.message || e) }));
+  const out = [];
+  out.push(await grab('dashboard'));
+  await page.goto(`${BASE}/basket`, { waitUntil: 'domcontentloaded', timeout: 60000 }); await page.waitForTimeout(2500);
+  out.push(await grab('basket'));
+  for (const c of codes.slice(0, 2)) {
+    await page.goto(`${BASE}/search?q=${encodeURIComponent(c)}`, { waitUntil: 'domcontentloaded', timeout: 60000 }); await page.waitForTimeout(2500);
+    const s = await grab(`search ${c}`);
+    s.productLinks = await page.evaluate(() => [...document.querySelectorAll('a[href*="/product"]')].slice(0, 6).map((a) => a.getAttribute('href'))).catch(() => []);
+    out.push(s);
+    if (s.productLinks && s.productLinks[0]) {
+      await page.goto(new URL(s.productLinks[0], BASE).href, { waitUntil: 'domcontentloaded', timeout: 60000 }); await page.waitForTimeout(2500);
+      out.push(await grab(`product ${c}`));
+    }
+  }
+  await page.goto(`${BASE}/account/pages/sales-orders`, { waitUntil: 'domcontentloaded', timeout: 60000 }); await page.waitForTimeout(3000);
+  out.push(await grab('sales-orders'));
+  return { pages: out };
+}
