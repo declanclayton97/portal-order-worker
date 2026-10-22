@@ -236,13 +236,21 @@ async function fillCheckout(page, { ref }) {
   filled.country = await page.selectOption('select[name="delivery_country"]', 'GB').then(() => true).catch(() => false);
   for (const [k, v] of Object.entries(DELIVERY)) filled[k] = await set(k, v);
   filled.po = await set('custom_fields[cf_po_number]', String(ref));
-  // Step "CONTINUE »" buttons only move between sections of the same page.
-  for (const b of await page.locator('button:has-text("CONTINUE »")').all()) { if (await b.isVisible().catch(() => false)) { await b.click().catch(() => {}); await page.waitForTimeout(2500); } }
+  // Delivery: Standard (1-3 working days), £7.50 — Dec's carriage rule (22 Oct 2026). Chosen by its
+  // LABEL, never by position/value, so a reordered list cannot pick next-day or collection.
   const delivery = await page.evaluate(() => [...document.querySelectorAll('input[name="pay_delivery_option"]')].map((r) => {
-    const lab = r.closest('label') || document.querySelector(`label[for="${r.id}"]`) || r.parentElement;
-    return { value: r.value, checked: r.checked, label: ((lab && lab.innerText) || '').replace(/\s+/g, ' ').trim().slice(0, 120) };
+    const row = r.closest('tr') || r.closest('label') || r.parentElement;
+    return { value: r.value, label: ((row && row.innerText) || '').replace(/s+/g, ' ').trim().slice(0, 140) };
   }));
+  const standard = delivery.filter((d) => /^Standard Delivery/i.test(d.label));
+  if (standard.length !== 1) return { filled, delivery, refused: 'standard-delivery-not-found-exactly-once' };
+  await page.locator(`input[name="pay_delivery_option"][value="${standard[0].value}"]`).check({ force: true });
+  await page.waitForTimeout(2500);
+  // The section "CONTINUE »" buttons only move between sections of the same page (they place nothing).
+  for (const b of await page.locator('button:has-text("CONTINUE »")').all()) { if (await b.isVisible().catch(() => false)) { await b.click().catch(() => {}); await page.waitForTimeout(2500); } }
   const pay = await page.locator('input[name="pay_method"][value="sb_credit_account"]').check({ force: true }).then(() => true).catch(() => false);
+  await page.waitForTimeout(1500);
+  const terms = await page.locator('#agree-terms').check({ force: true }).then(() => true).catch(() => false);
   const state = await page.evaluate(() => {
     const v = (n) => (document.querySelector(`[name="${n}"]`) || {}).value;
     const txt = (document.body.innerText || '').replace(/\s+/g, ' ');
@@ -254,7 +262,7 @@ async function fillCheckout(page, { ref }) {
       errors: [...document.querySelectorAll('.has-error, .error, .alert-danger, .help-block')].map((e) => (e.innerText || '').trim()).filter(Boolean).slice(0, 10),
     };
   });
-  return { filled, delivery, creditAccount: pay, state };
+  return { filled, delivery, chosenDelivery: standard[0], creditAccount: pay, terms, state };
 }
 
 // Rehearsal: stage → fill the whole checkout → screenshot → empty our basket. Never clicks
