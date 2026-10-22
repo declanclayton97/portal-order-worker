@@ -142,20 +142,36 @@ async function basketState(page) {
 async function quickAdd(page, lines) {
   const form = page.locator('form.bulk-add-to-basket').first();
   await form.waitFor({ state: 'attached', timeout: 15000 });
-  // The form may be inside a hidden Quick Order panel; drive its fields directly by index.
+  const block = page.locator('.bulk-add-to-basket-row');
+  // Fill each row, then BLUR it: the site's own validateRow (on blur) looks the code up for an EXACT
+  // sku match and checks stock, and only rows it marks .valid are sent by its submit().
   for (let i = 0; i < lines.length; i++) {
     let rows = await form.locator('input[name="identifier[]"]').count();
-    while (rows <= i) { await form.locator('button.add-new-row').first().evaluate((b) => b.click()); await page.waitForTimeout(150); rows = await form.locator('input[name="identifier[]"]').count(); }
-    await form.locator('input[name="identifier[]"]').nth(i).evaluate((el, v) => { el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }, String(lines[i].code));
-    await form.locator('input[name="quantity[]"]').nth(i).evaluate((el, v) => { el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }, String(lines[i].qty));
+    while (rows <= i) { await form.locator('button.add-new-row').first().evaluate((b) => b.click()); await page.waitForTimeout(200); rows = await form.locator('input[name="identifier[]"]').count(); }
+    await form.locator('input[name="quantity[]"]').nth(i).evaluate((el, v) => { el.value = v; }, String(lines[i].qty));
+    await form.locator('input[name="identifier[]"]').nth(i).evaluate((el, v) => { el.value = v; window.jQuery(el).trigger('blur'); }, String(lines[i].code));
   }
+  // Wait for every row to settle (valid, or showing a reason), up to 20s.
+  const t0 = Date.now(); let status = [];
+  while (Date.now() - t0 < 20000) {
+    status = await page.evaluate(() => [...document.querySelectorAll('form.bulk-add-to-basket .bulk-add-to-basket-row')].map((r) => ({
+      code: (r.querySelector('input[name="identifier[]"], select') || {}).value || '', valid: r.classList.contains('valid'),
+      sku: r.dataset.sku || null, skuKeyword: r.dataset.skuKeyword || null, qty: r.dataset.qty || null,
+      msg: ((r.querySelector('.bulk-add-to-basket-status-box') || {}).innerText || '').trim().slice(0, 120),
+      busy: !!r.querySelector('.fa-spin'), multiple: !!r.querySelector('.bulk-add-to-basket-multiple-options'),
+    })).filter((x) => x.code));
+    if (status.length >= lines.length && status.every((x) => !x.busy)) break;
+    await page.waitForTimeout(500);
+  }
+  const notValid = status.filter((x) => !x.valid);
+  if (notValid.length) return { submitted: false, status, refused: 'rows-not-valid' };
   const responses = [];
-  const onResp = async (r) => { if (/basket|bulk/i.test(r.url()) && r.request().method() !== 'GET') responses.push({ url: r.url(), status: r.status(), body: (await r.text().catch(() => '')).slice(0, 800) }); };
+  const onResp = async (r) => { if (/bulk_add_to_basket/i.test(r.url())) responses.push({ url: r.url(), status: r.status(), body: (await r.text().catch(() => '')).slice(0, 800) }); };
   page.on('response', onResp);
-  await form.locator('button.bulk-add-to-basket-submit').first().evaluate((b) => b.click());
+  await form.evaluate((f) => window.jQuery(f).trigger('submit'));
   await page.waitForTimeout(6000);
   page.off('response', onResp);
-  return { responses, pageSaid: await text(page, 600) };
+  return { submitted: true, status, responses };
 }
 
 // lines: [{ stockCode|sku, qty }]. Rehearsal-safe: adds to the basket only; checkout is place().
