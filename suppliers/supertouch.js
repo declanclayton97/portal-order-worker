@@ -41,6 +41,15 @@ export async function login(page, { user, pass }) {
     await page.click('#cookie-confirm-choices').catch(() => {});
     await page.locator('.cookie-pop-up-wrapper').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
   }
+  // "Welcome to Our New Portal" notice (popup-modal on-page-load) shows on every visit and covers the
+  // form. Close it with its ×; never follow its Recreate Password button.
+  const notice = page.locator('.popup-modal.on-page-load');
+  await notice.first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+  if (await notice.first().isVisible().catch(() => false)) {
+    const closeBtn = notice.locator('.popup-modal__close-btn').first();
+    await closeBtn.click({ timeout: 5000 }).catch(() => page.keyboard.press('Escape').catch(() => {}));
+    await notice.first().waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+  }
   await page.check('#returning_customer').catch(() => {});
   await page.fill('#customerEmail', user);
   await page.fill('#customerPassword', pass);
