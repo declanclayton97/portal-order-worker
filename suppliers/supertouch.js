@@ -260,6 +260,13 @@ async function fillCheckout(page, { ref }) {
   // The section "CONTINUE »" buttons only move between sections of the same page (they place nothing).
   // Click the delivery section's one (inside the form column, not the order-summary sidebar), then record
   // what a person would SEE: visible error messages and whether Payment opened.
+  const validator = await page.evaluate(() => {
+    const $ = window.jQuery; const out = { scripts: [...document.querySelectorAll('script[src]')].map((x) => x.src).filter((u) => !/google|gtag|facebook|hotjar|clarity|stripe/i.test(u)).slice(0, 30) };
+    try { const fv = $ && ($('#form_pay').data('formValidation') || $('#form_pay').data('bootstrapValidator')); if (fv) { out.kind = fv.getInvalidFields ? 'fv' : 'bv'; out.invalid = (fv.getInvalidFields ? fv.getInvalidFields() : $()).map(function () { return this.name || this.id; }).get().slice(0, 30); } } catch (e) { out.fvError = String(e.message || e); }
+    out.inline = [...document.querySelectorAll('script:not([src])')].map((x) => x.textContent).filter((t) => /btn-continue|disabled/i.test(t)).map((t) => t.replace(/s+/g, ' ').slice(0, 1500)).slice(0, 4);
+    out.requiredEmpty = [...document.querySelectorAll('#form_pay [required], #form_pay [data-fv-notempty], #form_pay [data-bv-notempty]')].filter((e) => !e.value).map((e) => `${e.name}${e.offsetParent ? '' : '(hidden)'}`).slice(0, 30);
+    return out;
+  }).catch((e) => ({ error: String(e.message || e) }));
   const continued = [];
   const buttonsBefore = await page.evaluate(() => [...document.querySelectorAll('button')].filter((b) => /CONTINUE/i.test(b.innerText || '') && b.offsetParent !== null).map((b) => ({ txt: b.innerText.trim(), disabled: b.disabled, cls: b.className.slice(0, 80) })));
   for (const b of await page.locator('button:has-text("CONTINUE »")').all()) {
@@ -287,7 +294,7 @@ async function fillCheckout(page, { ref }) {
       errors: [...document.querySelectorAll('.has-error, .error, .alert-danger, .help-block')].map((e) => (e.innerText || '').trim()).filter(Boolean).slice(0, 10),
     };
   });
-  return { filled, delivery, chosenDelivery: standard[0], buttonsBefore, continued, visibleErrors, paymentOpen, creditAccount: pay, terms, state };
+  return { filled, delivery, chosenDelivery: standard[0], validator, buttonsBefore, continued, visibleErrors, paymentOpen, creditAccount: pay, terms, state };
 }
 
 // Rehearsal: stage → fill the whole checkout → screenshot → empty our basket. Never clicks
