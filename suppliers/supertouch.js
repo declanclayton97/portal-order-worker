@@ -234,8 +234,10 @@ async function fillCheckout(page, { ref }) {
   await page.evaluate(() => { const s = document.querySelector('select[name="delivery_addresses"]'); if (s) { s.value = ''; window.jQuery && window.jQuery(s).trigger('change'); } });
   await page.waitForTimeout(800);
   filled.country = await page.selectOption('select[name="delivery_country"]', 'GB').then(() => true).catch(() => false);
-  for (const [k, v] of Object.entries(DELIVERY)) filled[k] = await set(k, v);
-  filled.po = await set('custom_fields[cf_po_number]', String(ref));
+  // Type for real: the site's validator only unlocks CONTINUE on genuine input/keyup/blur events.
+  const type = async (name, v) => { const el = page.locator(`[name="${name}"]`).first(); if (!(await el.count())) return false; await el.scrollIntoViewIfNeeded().catch(() => {}); await el.fill('').catch(() => {}); await el.pressSequentially(String(v), { delay: 15 }).catch(() => {}); await el.blur().catch(() => {}); return (await el.inputValue().catch(() => '')) === String(v); };
+  for (const [k, v] of Object.entries(DELIVERY)) filled[k] = await type(k, v);
+  filled.po = await type('custom_fields[cf_po_number]', String(ref));
   // Delivery: Standard (1-3 working days), £7.50 — Dec's carriage rule (22 Oct 2026). Chosen by its
   // LABEL, never by position/value, so a reordered list cannot pick next-day or collection.
   const delivery = await page.evaluate(() => [...document.querySelectorAll('input[name="pay_delivery_option"]')].map((r) => {
@@ -245,7 +247,13 @@ async function fillCheckout(page, { ref }) {
   const standard = delivery.filter((d) => /^Standard Delivery/i.test(d.label));
   if (standard.length !== 1) return { filled, delivery, refused: 'standard-delivery-not-found-exactly-once' };
   // The radios are styled; a plain check() does not move them. Click the row, then set it directly.
-  await page.evaluate((v) => { const r = document.querySelector(`input[name="pay_delivery_option"][value="${v}"]`); if (!r) return; const row = r.closest('tr') || r.parentElement; if (row) row.click(); if (!r.checked) { r.checked = true; window.jQuery ? window.jQuery(r).trigger('click').trigger('change') : r.dispatchEvent(new Event('change', { bubbles: true })); } }, standard[0].value);
+  await page.locator(`input[name="pay_delivery_option"][value="${standard[0].value}"]`).scrollIntoViewIfNeeded().catch(() => {});
+  await page.getByText(/^Standard Delivery/).first().click({ timeout: 5000 }).catch(() => {});
+  await page.waitForTimeout(1500);
+  if (!(await page.evaluate((v) => !!(document.querySelector(`input[name="pay_delivery_option"][value="${v}"]`) || {}).checked, standard[0].value))) {
+    await page.locator(`input[name="pay_delivery_option"][value="${standard[0].value}"]`).click({ force: true, timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(1500);
+  }
   const deliveryChecked = await page.evaluate((v) => !!(document.querySelector(`input[name="pay_delivery_option"][value="${v}"]`) || {}).checked, standard[0].value);
   if (!deliveryChecked) return { filled, delivery, refused: 'standard-delivery-would-not-select' };
   await page.waitForTimeout(2500);
@@ -253,6 +261,7 @@ async function fillCheckout(page, { ref }) {
   // Click the delivery section's one (inside the form column, not the order-summary sidebar), then record
   // what a person would SEE: visible error messages and whether Payment opened.
   const continued = [];
+  const buttonsBefore = await page.evaluate(() => [...document.querySelectorAll('button')].filter((b) => /CONTINUE/i.test(b.innerText || '') && b.offsetParent !== null).map((b) => ({ txt: b.innerText.trim(), disabled: b.disabled, cls: b.className.slice(0, 80) })));
   for (const b of await page.locator('button:has-text("CONTINUE »")').all()) {
     if (!(await b.isVisible().catch(() => false))) continue;
     const box = await b.boundingBox().catch(() => null);
@@ -278,7 +287,7 @@ async function fillCheckout(page, { ref }) {
       errors: [...document.querySelectorAll('.has-error, .error, .alert-danger, .help-block')].map((e) => (e.innerText || '').trim()).filter(Boolean).slice(0, 10),
     };
   });
-  return { filled, delivery, chosenDelivery: standard[0], continued, visibleErrors, paymentOpen, creditAccount: pay, terms, state };
+  return { filled, delivery, chosenDelivery: standard[0], buttonsBefore, continued, visibleErrors, paymentOpen, creditAccount: pay, terms, state };
 }
 
 // Rehearsal: stage → fill the whole checkout → screenshot → empty our basket. Never clicks
