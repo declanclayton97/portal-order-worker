@@ -50,9 +50,17 @@ export async function login(page, { user, pass }) {
     await closeBtn.click({ timeout: 5000 }).catch(() => page.keyboard.press('Escape').catch(() => {}));
     await notice.first().waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
   }
-  await page.check('#returning_customer').catch(() => {});
+  // Email-first form (seen 2026-10-23): the password box stays hidden until the email is entered and
+  // "I have a password" is chosen. Fill the email, leave the box, click the radio for real, then wait.
   await page.fill('#customerEmail', user);
-  await page.fill('#customerPassword', pass);
+  await page.locator('#customerEmail').blur().catch(() => {});
+  await page.waitForTimeout(800);
+  const pw = page.locator('#customerPassword');
+  for (let i = 0; i < 3 && !(await pw.isVisible().catch(() => false)); i++) {
+    await page.locator('label[for="returning_customer"], #returning_customer').first().click({ timeout: 5000 }).catch(() => {});
+    await pw.waitFor({ state: 'visible', timeout: 4000 }).catch(() => {});
+  }
+  await pw.fill(pass, { timeout: 15000 });
   await Promise.all([
     page.waitForLoadState('domcontentloaded', { timeout: 45000 }).catch(() => {}),
     page.click('#login-form button[name="login"]'),
