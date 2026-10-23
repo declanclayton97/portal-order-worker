@@ -56,9 +56,19 @@ export async function login(page, { user, pass }) {
   await page.locator('#customerEmail').blur().catch(() => {});
   await page.waitForTimeout(800);
   const pw = page.locator('#customerPassword');
+  // The section #shopblocks-input-password is shown by the page's script on the login_type radio's
+  // change event - and that radio is ALREADY checked on load, so nothing ever fires it. Fire it the way
+  // the site listens (jQuery change), then fall back to showing the section (it is the normal login UI).
   for (let i = 0; i < 3 && !(await pw.isVisible().catch(() => false)); i++) {
-    await page.locator('label[for="returning_customer"], #returning_customer').first().click({ timeout: 5000 }).catch(() => {});
-    await pw.waitFor({ state: 'visible', timeout: 4000 }).catch(() => {});
+    await page.evaluate(() => {
+      const r = document.getElementById('returning_customer');
+      if (r) { r.checked = true; if (window.jQuery) window.jQuery(r).trigger('click').trigger('change'); else r.dispatchEvent(new Event('change', { bubbles: true })); }
+    }).catch(() => {});
+    await pw.waitFor({ state: 'visible', timeout: 3000 }).catch(() => {});
+    if (!(await pw.isVisible().catch(() => false))) {
+      await page.evaluate(() => { const c = document.getElementById('shopblocks-input-password'); if (c) { c.style.display = 'block'; c.classList.remove('hidden', 'd-none'); } }).catch(() => {});
+      await page.waitForTimeout(500);
+    }
   }
   await pw.fill(pass, { timeout: 15000 });
   await Promise.all([
