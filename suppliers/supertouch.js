@@ -263,18 +263,30 @@ async function fillCheckout(page, { ref }) {
   const standard = delivery.filter((d) => /^Standard Delivery/i.test(d.label));
   if (standard.length !== 1) return { filled, delivery, refused: 'standard-delivery-not-found-exactly-once' };
   // The radios are styled; a plain check() does not move them. Click the row, then set it directly.
-  // The site's pay bundle binds clicks on .pay-delivery-option-row; that posts delivery.set and, on
-  // success, enables the CONTINUE buttons. Let the address save settle first (it re-renders the rows).
-  await page.waitForTimeout(3500);
-  const rowSel = `.pay-delivery-option-row:has(input[name="pay_delivery_option"][value="${standard[0].value}"])`;
-  const setResp = page.waitForResponse((r) => /delivery/i.test(r.url()) && r.request().method() === 'POST', { timeout: 15000 }).catch(() => null);
-  await page.locator(rowSel).first().scrollIntoViewIfNeeded().catch(() => {});
-  await page.locator(rowSel).first().click({ timeout: 8000 }).catch(() => {});
-  const resp = await setResp;
-  await page.waitForTimeout(2000);
-  const deliverySet = resp ? { url: new URL(resp.url()).pathname, status: resp.status() } : null;
-  const deliveryChecked = await page.evaluate((v) => !!(document.querySelector(`input[name="pay_delivery_option"][value="${v}"]`) || {}).checked, standard[0].value);
-  if (!deliveryChecked) return { filled, delivery, refused: 'standard-delivery-would-not-select' };
+  // The site's pay bundle binds clicks on .pay-delivery-option-row: setActiveDeliveryOption adds
+  // .active + ticks the radio, then posts /pay/setDeliveryMethod; only its success enables CONTINUE.
+  // The rows are RE-RENDERED after the address save, so re-find the row on every attempt (a click on a
+  // stale element does nothing - that is how the first live run, PO 498829, failed on 2026-10-23).
+  let deliverySet = null, deliveryChecked = false, deliveryAttempts = [];
+  for (let attempt = 1; attempt <= 3 && !deliveryChecked; attempt++) {
+    await page.waitForTimeout(attempt === 1 ? 3500 : 2500);
+    const row = page.locator('.pay-delivery-option-row').filter({ hasText: /Standard Delivery/i }).first();
+    const found = await row.count().catch(() => 0);
+    const respP = page.waitForResponse((r) => /setDeliveryMethod|delivery/i.test(r.url()) && r.request().method() === 'POST', { timeout: 12000 }).catch(() => null);
+    if (found) { await row.scrollIntoViewIfNeeded().catch(() => {}); await row.click({ timeout: 8000 }).catch(() => {}); }
+    const resp = found ? await respP : null;
+    if (resp) deliverySet = { url: new URL(resp.url()).pathname, status: resp.status() };
+    await page.waitForTimeout(1500);
+    const st = await page.evaluate(() => {
+      const rows = [...document.querySelectorAll('.pay-delivery-option-row')];
+      const std = rows.find((r) => /Standard Delivery/i.test(r.innerText || ''));
+      const radio = std && std.querySelector('input[type=radio]');
+      return { rows: rows.length, active: !!(std && std.classList.contains('active')), radio: !!(radio && radio.checked), value: radio && radio.value };
+    }).catch((e) => ({ error: String(e.message || e) }));
+    deliveryAttempts.push({ attempt, found, ...st, resp: deliverySet && deliverySet.status });
+    deliveryChecked = !!(st.active || st.radio);
+  }
+  if (!deliveryChecked) return { filled, delivery, deliveryAttempts, refused: 'standard-delivery-would-not-select' };
   await page.waitForTimeout(2500);
   // The section "CONTINUE »" buttons only move between sections of the same page (they place nothing).
   // Click the delivery section's one (inside the form column, not the order-summary sidebar), then record
@@ -313,7 +325,7 @@ async function fillCheckout(page, { ref }) {
       errors: [...document.querySelectorAll('.has-error, .error, .alert-danger, .help-block')].map((e) => (e.innerText || '').trim()).filter(Boolean).slice(0, 10),
     };
   });
-  return { filled, delivery, chosenDelivery: standard[0], deliverySet, validator, buttonsBefore, continued, visibleErrors, paymentOpen, creditAccount: pay, terms, state };
+  return { filled, delivery, chosenDelivery: standard[0], deliverySet, deliveryAttempts, validator, buttonsBefore, continued, visibleErrors, paymentOpen, creditAccount: pay, terms, state };
 }
 
 // Rehearsal: stage → fill the whole checkout → screenshot → empty our basket. Never clicks
