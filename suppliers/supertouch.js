@@ -29,18 +29,24 @@ async function loggedIn(page) {
   }).catch(() => ({ logoutLink: false, passwordBoxShown: true }));
 }
 
+// Essential cookies only: "Let me choose", leave the optional boxes unticked, "Confirm my choices".
+// Safe to call when no banner is showing.
+async function answerCookies(page) {
+  if (!(await page.locator('#let-me-choose').isVisible().catch(() => false))) return false;
+  await page.click('#let-me-choose').catch(() => {});
+  for (const n of ['performance_and_analytics', 'functional', 'advertising']) await page.uncheck(`input.cookie-checkbox[name="${n}"]`).catch(() => {});
+  await page.click('#cookie-confirm-choices').catch(() => {});
+  await page.locator('.cookie-pop-up-wrapper').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+  return true;
+}
+
 export async function login(page, { user, pass }) {
   await page.goto(`${BASE}/login`, { waitUntil: 'domcontentloaded', timeout: 60000 });
   // The cookie banner covers the Login button. Answer it the privacy-preserving way: "Let me choose",
   // leave the optional boxes unticked (only strictly-necessary is pre-ticked), "Confirm my choices".
   // The banner is drawn by script after DOMContentLoaded, so wait for it rather than glance once.
   await page.locator('.cookie-pop-up-wrapper').first().waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
-  if (await page.locator('#let-me-choose').isVisible().catch(() => false)) {
-    await page.click('#let-me-choose').catch(() => {});
-    for (const n of ['performance_and_analytics', 'functional', 'advertising']) await page.uncheck(`input.cookie-checkbox[name="${n}"]`).catch(() => {});
-    await page.click('#cookie-confirm-choices').catch(() => {});
-    await page.locator('.cookie-pop-up-wrapper').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
-  }
+  await answerCookies(page);
   // "Welcome to Our New Portal" notice (popup-modal on-page-load) shows on every visit and covers the
   // form. Close it with its ×; never follow its Recreate Password button.
   const notice = page.locator('.popup-modal.on-page-load');
@@ -71,6 +77,9 @@ export async function login(page, { user, pass }) {
     }
   }
   await pw.fill(pass, { timeout: 15000 });
+  // The banner can be drawn AFTER the 10s wait above (26 Oct 2026: it covered Login and the click
+  // timed out), so answer it again right before clicking.
+  await answerCookies(page);
   await Promise.all([
     page.waitForLoadState('domcontentloaded', { timeout: 45000 }).catch(() => {}),
     page.click('#login-form button[name="login"]'),
