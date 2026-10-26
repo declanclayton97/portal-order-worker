@@ -424,12 +424,37 @@ export async function place(page, { ref } = {}) {
   const visible = [];
   for (const b of await btn.all()) if (await b.isVisible().catch(() => false)) visible.push(b);
   if (!visible.length) { await emptyBasket(page).catch(() => {}); return { placed: false, refused: 'no-enabled-continue-to-payment', checkout: co }; }
+  // "Continue to Payment" does NOT place the order. It shows "This may take a moment", then opens a
+  // second page, /pay/instance — "Pay Via Credit Account" with the balance after purchase, its OWN
+  // unticked terms box and a "COMPLETE PURCHASE" button. That button places it (walked by hand in
+  // Dec's Chrome 26 Oct 2026, order 1000319173). Until it is clicked nothing is ordered.
   await visible[0].click({ timeout: 10000 });
-  await page.waitForURL(/thank|complete|success|confirmation/i, { timeout: 90000 }).catch(() => {});
+  const reachedInstance = await page.waitForURL(/\/pay\/instance/i, { timeout: 90000 }).then(() => true).catch(() => false);
+  await page.waitForTimeout(1500);
+  const inst = await page.evaluate(() => {
+    const t = (document.body.innerText || '').replace(/\s+/g, ' ');
+    const b = document.querySelector('button.complete-purchase');
+    return { url: location.href, creditAccount: /Pay Via Credit Account/i.test(t), balanceAfter: (t.match(/Available Balance after purchase:\s*£([\d,.]+)/i) || [])[1] || null, button: !!(b && b.offsetParent !== null && !b.disabled) };
+  }).catch(() => ({}));
+  if (!reachedInstance || !inst.creditAccount || !inst.button) {
+    // Complete Purchase was never clicked, so nothing was ordered.
+    await emptyBasket(page).catch(() => {});
+    return { placed: false, refused: 'no-complete-purchase-page', instance: inst, checkout: co };
+  }
+  const termsBox = page.locator('#agree-terms').first();
+  if (!(await termsBox.isChecked().catch(() => false))) await termsBox.check({ force: true }).catch(() => {});
+  if (!(await termsBox.isChecked().catch(() => false))) {
+    await emptyBasket(page).catch(() => {});
+    return { placed: false, refused: 'complete-purchase-terms-not-ticked', instance: inst, checkout: co };
+  }
+  // Exactly once. Anything after this click may have placed the order.
+  await page.locator('button.complete-purchase').first().click({ timeout: 10000 });
+  await page.waitForURL(/thank-you/i, { timeout: 120000 }).catch(() => {});
   await page.waitForTimeout(3000);
-  const after = await page.evaluate(() => ({ url: location.href, text: (document.body.innerText || '').replace(/s+/g, ' ').slice(0, 2500) }));
-  const m = after.text.match(/orders*(?:number|no.?|ref(?:erence)?|#)s*[:#]?s*([A-Z0-9][A-Z0-9-]{3,})/i);
-  const thanked = /thank you/i.test(after.text) && /thank|complete|success|confirmation/i.test(after.url);
+  const after = await page.evaluate(() => ({ url: location.href, text: (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 2500) }));
+  // The thank-you page shows our PO number, not theirs; their number (e.g. 1000319173) comes from Sales Orders.
+  const m = null;
+  const thanked = /order is confirmed/i.test(after.text) && new RegExp(`PO Number:\\s*${String(ref).replace(/[^\w-]/g, '')}\\b`, 'i').test(after.text);
   const shot = await page.screenshot({ fullPage: true, type: 'jpeg', quality: 55 }).then((b) => `data:image/jpeg;base64,${b.toString('base64')}`).catch(() => null);
   let listed = null;
   try { listed = await ordersList(page, { ref }); } catch (e) { listed = { error: String(e.message || e) }; }
@@ -450,6 +475,7 @@ export async function ordersList(page, { ref = null } = {}) {
   });
   const pick = (o, re) => { const k = Object.keys(o).find((x) => re.test(x)); return k ? o[k] : null; };
   const norm = rows.map((o) => ({ ourRef: pick(o, /Our Ref/i), date: pick(o, /Date/i), yourRef: pick(o, /Your Ref/i), status: pick(o, /Status/i), net: pick(o, /NET/i) }));
-  const matches = ref ? norm.filter((r) => String(r.yourRef || '').trim().toUpperCase() === String(ref).trim().toUpperCase()) : [];
+  // "Your Ref" is shown as "<our PO> <date> <their counter>" (e.g. "498829 2026-10-26 6340"), so match the first token.
+  const matches = ref ? norm.filter((r) => String(r.yourRef || '').trim().split(/\s+/)[0].toUpperCase() === String(ref).trim().toUpperCase()) : [];
   return { rows: norm.slice(0, 15), matches };
 }
