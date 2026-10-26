@@ -349,12 +349,16 @@ async function fillCheckout(page, { ref }) {
   // Open = a person can SEE the payment step: the "select a payment method" heading or an ENABLED
   // "Continue to Payment" button is visible. The pay_method radios themselves are hidden behind styled
   // tiles, so their visibility says nothing (a false "closed" would refuse a good live run).
-  const paymentOpen = await page.evaluate(() => {
+  // Polled, not glanced: on the 26 Oct live run the section opened a beat after CONTINUE and a single
+  // check refused a good order (the rehearsal minutes earlier saw it open).
+  const paymentIsOpen = () => page.evaluate(() => {
     const vis = (e) => !!(e && e.offsetParent !== null);
-    const heading = [...document.querySelectorAll('h1,h2,h3,h4,h5,p,div,span')].some((e) => /^s*Please select a payment methods*$/i.test(e.innerText || '') && vis(e));
+    const heading = [...document.querySelectorAll('h1,h2,h3,h4,h5,p,div,span')].some((e) => /^\s*Please select a payment method\s*$/i.test(e.innerText || '') && vis(e));
     const btn = [...document.querySelectorAll('button')].some((b) => /Continue to Payment/i.test(b.innerText || '') && vis(b) && !b.disabled && !b.classList.contains('disabled'));
     return heading || btn;
   }).catch(() => false);
+  let paymentOpen = false;
+  for (let i = 0; i < 15 && !(paymentOpen = await paymentIsOpen()); i++) await page.waitForTimeout(1000);
   const pay = await page.evaluate(() => { const r = document.querySelector('input[name="pay_method"][value="sb_credit_account"]'); if (!r) return false; const row = r.closest('label') || r.parentElement; if (row) row.click(); if (!r.checked) { r.checked = true; window.jQuery && window.jQuery(r).trigger('click').trigger('change'); } return r.checked; }).catch(() => false);
   await page.waitForTimeout(1500);
   const terms = await page.evaluate(() => { const r = document.querySelector('#agree-terms'); if (!r) return false; if (!r.checked) { r.checked = true; window.jQuery && window.jQuery(r).trigger('change'); } return r.checked; }).catch(() => false);
