@@ -265,7 +265,16 @@ async function fillCheckout(page, { ref }) {
   }, { name, v });
   const filled = {};
   // Never the saved (old) address: leave the dropdown on "Select Address" and type ours.
-  await page.evaluate(() => { const s = document.querySelector('select[name="delivery_addresses"]'); if (s) { s.value = ''; window.jQuery && window.jQuery(s).trigger('change'); } });
+  // Only fire the change when it actually moves off a saved address. Since 26 Oct 2026 (pay bundle
+  // v26.44.3) the site's own change handler (findMatchingSavedAddress -> normalizeAddress) throws
+  // "reading 'country_code'" when the dropdown is blank, and that throw aborted the whole fill.
+  // A throw from their handler is theirs, not a failure of ours: place() re-verifies the typed address.
+  await page.evaluate(() => {
+    const s = document.querySelector('select[name="delivery_addresses"]');
+    if (!s || s.value === '') return;
+    s.value = '';
+    try { window.jQuery && window.jQuery(s).trigger('change'); } catch { /* site handler bug, see above */ }
+  });
   await page.waitForTimeout(800);
   filled.country = await page.selectOption('select[name="delivery_country"]', 'GB').then(() => true).catch(() => false);
   // Type for real: the site's validator only unlocks CONTINUE on genuine input/keyup/blur events.
