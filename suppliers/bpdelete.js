@@ -78,11 +78,12 @@ export async function place(page) {
       const rows = await readRows(page);
       const hit = rows.filter((r) => r.productId === Number(p.productId) && r.sku.toUpperCase() === String(p.sku).toUpperCase());
       if (hit.length !== 1) { done.push({ productId: p.productId, skip: 'row not found at delete time' }); continue; }
-      // untick everything, then tick only this row
-      await page.$$eval('input[type=checkbox]', (cbs) => cbs.forEach((c) => { if (c.checked) c.click(); }));
-      await page.check(hit[0].cbId ? `[id="${hit[0].cbId}"]` : `input[type=checkbox][name="${hit[0].cbName}"][value="${hit[0].cbValue}"]`);
-      const ticked = await page.$$eval('input[type=checkbox]:checked', (cbs) => cbs.length);
-      if (ticked !== 1) { done.push({ productId: p.productId, error: `${ticked} boxes ticked, expected 1 - not deleted` }); continue; }
+      // Product rows are the checkBox_<id> boxes; the page's filter widgets are checkboxes too and
+      // some are ticked by default, so only product boxes are touched or counted.
+      await page.$$eval('input[type=checkbox][name^="checkBox_"]', (cbs) => cbs.forEach((c) => { if (c.checked) c.click(); }));
+      await page.check(`input[type=checkbox][name="checkBox_${p.productId}"]`);
+      const ticked = await page.$$eval('input[type=checkbox][name^="checkBox_"]:checked', (cbs) => cbs.map((c) => c.name));
+      if (ticked.length !== 1 || ticked[0] !== `checkBox_${p.productId}`) { done.push({ productId: p.productId, error: `ticked ${ticked.join(',') || 'nothing'}, expected only checkBox_${p.productId} - not deleted` }); continue; }
       const del = page.locator('a,button,input').filter({ hasText: /^\s*Delete\s*$/ }).first();
       const delCount = await del.count();
       const btn = delCount ? del : page.locator('input[value="Delete"]').first();
