@@ -26,11 +26,13 @@ const readRows = (page) => page.evaluate(() => {
   for (const tr of document.querySelectorAll('tr')) {
     const cb = tr.querySelector('input[type=checkbox]');
     if (!cb) continue;
+    // product rows carry checkbox name/id "checkBox_<productId>" (seen 27 Oct 2026); filter widgets don't
+    const idm = String(cb.name || '').match(/^checkBox_(\d+)$/);
+    if (!idm) continue;
     const cells = [...tr.querySelectorAll('td')].map((td) => td.innerText.trim());
-    const idm = (cells[1] || '').match(/(\d{3,})\s*$/);
-    out.push({ cbName: cb.name, cbValue: cb.value, cbId: cb.id, sku: (cells[1] || '').split('\n')[0].trim(), productId: idm ? Number(idm[1]) : null, name: (cells[2] || '').split('\n')[0].trim() });
+    out.push({ cbName: cb.name, cbValue: cb.value, cbId: cb.id, sku: (cells[1] || '').split('\n')[0].trim(), productId: Number(idm[1]), name: (cells[2] || '').split('\n')[0].trim() });
   }
-  return out.filter((r) => r.productId || r.cbValue);
+  return out;
 });
 
 export async function inspect(page, { lines }) {
@@ -56,14 +58,8 @@ export async function stage(page, { lines }) {
   if (!Array.isArray(lines) || !lines.length) throw new Error('lines[] required');
   const bad = lines.filter((l) => !l.productId || !l.expectSku);
   if (bad.length) throw new Error(`${bad.length} line(s) missing productId/expectSku`);
-  plan = [];
-  for (const l of lines) {
-    await page.goto(searchUrl(l.expectSku), { waitUntil: 'networkidle', timeout: 90000 }).catch(() => {});
-    const rows = await readRows(page);
-    const hit = rows.filter((r) => r.productId === Number(l.productId) && r.sku.toUpperCase() === String(l.expectSku).trim().toUpperCase());
-    if (hit.length !== 1) { plan.push({ productId: l.productId, sku: l.expectSku, skip: hit.length ? 'more than one matching row' : 'row not found (already gone, or SKU changed)', rowsSeen: rows.length }); continue; }
-    plan.push({ productId: l.productId, sku: l.expectSku, cb: { name: hit[0].cbName, value: hit[0].cbValue, id: hit[0].cbId } });
-  }
+  // place() finds and checks each row itself; searching here too would double the page loads.
+  plan = lines.map((l) => ({ productId: Number(l.productId), sku: String(l.expectSku).trim() }));
   const todo = plan.filter((p) => !p.skip);
   return { ready: todo.length > 0, toDelete: todo.length, skipped: plan.length - todo.length, plan };
 }
@@ -97,7 +93,8 @@ export async function place(page) {
       let modalText = null;
       if (await modalOk.count().catch(() => 0)) { modalText = await page.locator('.modal:visible, .ui-dialog:visible, [role=dialog]:visible').first().innerText().catch(() => null); await modalOk.click().catch(() => {}); await page.waitForLoadState('networkidle', { timeout: 90000 }).catch(() => {}); await page.waitForTimeout(2000); }
       const notice = await page.evaluate(() => [...document.querySelectorAll('.alert,.error,.message,.notice,.success,#messageStack,.messageStack')].map((e) => e.innerText.trim()).filter(Boolean).join(' | ').slice(0, 300));
-      await page.goto(searchUrl(p.sku), { waitUntil: 'networkidle', timeout: 90000 });
+      // The post-delete page is the same search; the row being absent there is a hint only - the
+      // caller's API re-read is the proof.
       const still = (await readRows(page)).some((r) => r.productId === Number(p.productId));
       done.push({ productId: p.productId, sku: p.sku, gone: !still, dialog: dialogText, modal: modalText && modalText.slice(0, 200), notice });
     } catch (e) { done.push({ productId: p.productId, sku: p.sku, error: e.message.slice(0, 200) }); }
