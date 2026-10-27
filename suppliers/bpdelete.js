@@ -1,0 +1,104 @@
+// Brightpearl Product list — permanently DELETE archived products, as a person would.
+//
+// The public API has no product DELETE (27 Oct 2026: DELETE /product-service/product/{id} answers
+// CMNC-404 "Cannot find the resource" and the product stays). The UI does it: Products > List,
+// tick rows, then the "Delete" button beside "Batch update". BP refuses any product with
+// transactions; those rows simply survive and the caller's API re-read reports them as kept.
+//
+// lines: [{ productId, expectSku }, ...]
+//   opts.inspect  -> open the list (opts.url, or a quick search for lines[0].expectSku) and report
+//                    its filter form, row checkboxes, paging and Delete control; changes nothing
+//   execute:false -> find each product's row and report what WOULD be ticked
+//   execute:true  -> tick exactly those rows, click Delete, accept the confirm, reload and report
+//                    which rows are gone. Only the caller's API re-read counts as proof.
+// SAFETY: a row is ticked only when BOTH its product id and its SKU match a line. Nothing is ever
+// ticked by "select all".
+import { config as bpConfig, login as bpLogin } from './brightpearl.js';
+
+export const config = { ...bpConfig };
+export const login = bpLogin;
+
+const searchUrl = (q) => `${config.base}/report.php?search=${encodeURIComponent(q)}&report_type=product_list&order_type=&search_type=products&date_from=01%2F01%2F2000&quicksearch=1&output=screen`;
+
+// Every row on the list: its checkbox, the product id shown under the SKU, and the SKU text.
+const readRows = (page) => page.evaluate(() => {
+  const out = [];
+  for (const tr of document.querySelectorAll('tr')) {
+    const cb = tr.querySelector('input[type=checkbox]');
+    if (!cb) continue;
+    const cells = [...tr.querySelectorAll('td')].map((td) => td.innerText.trim());
+    const idm = (cells[1] || '').match(/(\d{3,})\s*$/);
+    out.push({ cbName: cb.name, cbValue: cb.value, cbId: cb.id, sku: (cells[1] || '').split('\n')[0].trim(), productId: idm ? Number(idm[1]) : null, name: (cells[2] || '').split('\n')[0].trim() });
+  }
+  return out.filter((r) => r.productId || r.cbValue);
+});
+
+export async function inspect(page, { lines }) {
+  const url = (lines[0] && lines[0].url) || searchUrl((lines[0] && lines[0].expectSku) || '');
+  await page.goto(url, { waitUntil: 'networkidle', timeout: 90000 }).catch(() => {});
+  const info = await page.evaluate(() => {
+    const ctl = (e) => ({ tag: e.tagName, type: e.type, name: e.name, id: e.id, value: String(e.value || '').slice(0, 40), text: (e.innerText || e.value || '').trim().slice(0, 40), onclick: (e.getAttribute('onclick') || '').slice(0, 160), href: (e.getAttribute('href') || '').slice(0, 160), visible: !!(e.offsetWidth || e.offsetHeight) });
+    const forms = [...document.forms].map((f) => ({ name: f.name, id: f.id, action: f.action, method: f.method, fields: [...f.elements].filter((e) => e.name).map((e) => ({ name: e.name, type: e.type, value: String(e.value).slice(0, 30), options: e.options ? [...e.options].slice(0, 12).map((o) => o.value + '=' + o.text.trim()) : undefined })).slice(0, 60) }));
+    const deletes = [...document.querySelectorAll('a,button,input')].filter((e) => /delete/i.test((e.innerText || e.value || '') + ' ' + (e.getAttribute('onclick') || '') + ' ' + (e.id || ''))).map(ctl).slice(0, 10);
+    const paging = [...document.querySelectorAll('a,select')].filter((e) => /page|limit|per|results|start|offset/i.test((e.name || '') + ' ' + (e.getAttribute('href') || '') + ' ' + (e.className || ''))).map(ctl).slice(0, 15);
+    const scripts = [...document.querySelectorAll('script:not([src])')].map((s) => s.textContent).filter((t) => /delete/i.test(t)).map((t) => { const i = t.search(/delete/i); return t.slice(Math.max(0, i - 300), i + 600); }).slice(0, 3);
+    return { title: document.title, url: location.href, forms, deletes, paging, scripts };
+  });
+  const rows = await readRows(page);
+  const shot = 'data:image/png;base64,' + (await page.screenshot({ fullPage: false })).toString('base64');
+  return { ...info, rows: rows.slice(0, 20), rowCount: rows.length, shot };
+}
+
+let plan = [];
+
+export async function stage(page, { lines }) {
+  if (!Array.isArray(lines) || !lines.length) throw new Error('lines[] required');
+  const bad = lines.filter((l) => !l.productId || !l.expectSku);
+  if (bad.length) throw new Error(`${bad.length} line(s) missing productId/expectSku`);
+  plan = [];
+  for (const l of lines) {
+    await page.goto(searchUrl(l.expectSku), { waitUntil: 'networkidle', timeout: 90000 }).catch(() => {});
+    const rows = await readRows(page);
+    const hit = rows.filter((r) => r.productId === Number(l.productId) && r.sku.toUpperCase() === String(l.expectSku).trim().toUpperCase());
+    if (hit.length !== 1) { plan.push({ productId: l.productId, sku: l.expectSku, skip: hit.length ? 'more than one matching row' : 'row not found (already gone, or SKU changed)', rowsSeen: rows.length }); continue; }
+    plan.push({ productId: l.productId, sku: l.expectSku, cb: { name: hit[0].cbName, value: hit[0].cbValue, id: hit[0].cbId } });
+  }
+  const todo = plan.filter((p) => !p.skip);
+  return { ready: todo.length > 0, toDelete: todo.length, skipped: plan.length - todo.length, plan };
+}
+
+// One product per search page, so a tick can never land on a neighbour: search, tick the one row
+// that matches id+SKU, Delete, accept the confirm, search again and see if the row is gone.
+export async function place(page) {
+  const done = [];
+  let dialogText = null;
+  page.on('dialog', async (d) => { dialogText = d.message(); await d.accept().catch(() => {}); });
+  for (const p of plan.filter((x) => !x.skip)) {
+    try {
+      dialogText = null;
+      await page.goto(searchUrl(p.sku), { waitUntil: 'networkidle', timeout: 90000 });
+      const rows = await readRows(page);
+      const hit = rows.filter((r) => r.productId === Number(p.productId) && r.sku.toUpperCase() === String(p.sku).toUpperCase());
+      if (hit.length !== 1) { done.push({ productId: p.productId, skip: 'row not found at delete time' }); continue; }
+      // untick everything, then tick only this row
+      await page.$$eval('input[type=checkbox]', (cbs) => cbs.forEach((c) => { if (c.checked) c.click(); }));
+      await page.check(hit[0].cbId ? `[id="${hit[0].cbId}"]` : `input[type=checkbox][name="${hit[0].cbName}"][value="${hit[0].cbValue}"]`);
+      const ticked = await page.$$eval('input[type=checkbox]:checked', (cbs) => cbs.length);
+      if (ticked !== 1) { done.push({ productId: p.productId, error: `${ticked} boxes ticked, expected 1 - not deleted` }); continue; }
+      const del = page.locator('a,button,input').filter({ hasText: /^\s*Delete\s*$/ }).first();
+      const delCount = await del.count();
+      const btn = delCount ? del : page.locator('input[value="Delete"]').first();
+      await Promise.all([page.waitForLoadState('networkidle', { timeout: 90000 }).catch(() => {}), btn.click({ timeout: 15000 })]);
+      await page.waitForTimeout(2500);
+      // a BP-styled (non-native) confirm box: press its OK/Yes/Delete if one is showing
+      const modalOk = page.locator('.modal:visible button, .ui-dialog:visible button, [role=dialog]:visible button').filter({ hasText: /^(ok|yes|delete|confirm)$/i }).first();
+      let modalText = null;
+      if (await modalOk.count().catch(() => 0)) { modalText = await page.locator('.modal:visible, .ui-dialog:visible, [role=dialog]:visible').first().innerText().catch(() => null); await modalOk.click().catch(() => {}); await page.waitForLoadState('networkidle', { timeout: 90000 }).catch(() => {}); await page.waitForTimeout(2000); }
+      const notice = await page.evaluate(() => [...document.querySelectorAll('.alert,.error,.message,.notice,.success,#messageStack,.messageStack')].map((e) => e.innerText.trim()).filter(Boolean).join(' | ').slice(0, 300));
+      await page.goto(searchUrl(p.sku), { waitUntil: 'networkidle', timeout: 90000 });
+      const still = (await readRows(page)).some((r) => r.productId === Number(p.productId));
+      done.push({ productId: p.productId, sku: p.sku, gone: !still, dialog: dialogText, modal: modalText && modalText.slice(0, 200), notice });
+    } catch (e) { done.push({ productId: p.productId, sku: p.sku, error: e.message.slice(0, 200) }); }
+  }
+  return { placed: true, gone: done.filter((d) => d.gone).length, kept: done.filter((d) => !d.gone).length, done };
+}
