@@ -42,7 +42,8 @@ export async function inspect(page, { lines }) {
     const deletes = [...document.querySelectorAll('a,button,input')].filter((e) => /delete/i.test((e.innerText || e.value || '') + ' ' + (e.getAttribute('onclick') || '') + ' ' + (e.id || ''))).map(ctl).slice(0, 10);
     const paging = [...document.querySelectorAll('a,select')].filter((e) => /page|limit|per|results|start|offset/i.test((e.name || '') + ' ' + (e.getAttribute('href') || '') + ' ' + (e.className || ''))).map(ctl).slice(0, 15);
     const scripts = [...document.querySelectorAll('script:not([src])')].map((s) => s.textContent).filter((t) => /delete/i.test(t)).map((t) => { const i = t.search(/delete/i); return t.slice(Math.max(0, i - 300), i + 600); }).slice(0, 3);
-    return { title: document.title, url: location.href, forms, deletes, paging, scripts };
+    const fn = (n) => (typeof window[n] === 'function' ? String(window[n]).slice(0, 2500) : null);
+    return { title: document.title, url: location.href, forms, deletes, paging, scripts, deleteFn: fn('deleteSelectedProducts'), batchFn: fn('batchAction') || fn('doBatchAction') };
   });
   const rows = await readRows(page);
   const shot = 'data:image/png;base64,' + (await page.screenshot({ fullPage: false })).toString('base64');
@@ -72,7 +73,8 @@ export async function stage(page, { lines }) {
 export async function place(page) {
   const done = [];
   let dialogText = null;
-  page.on('dialog', async (d) => { dialogText = d.message(); await d.accept().catch(() => {}); });
+  // BP's delete asks via confirm() or a prompt() that wants DELETE typed in capitals.
+  page.on('dialog', async (d) => { dialogText = `${d.type()}: ${d.message()}`; await (d.type() === 'prompt' ? d.accept('DELETE') : d.accept()).catch(() => {}); });
   for (const p of plan.filter((x) => !x.skip)) {
     try {
       dialogText = null;
