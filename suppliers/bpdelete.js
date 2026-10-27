@@ -30,7 +30,7 @@ const readRows = (page) => page.evaluate(() => {
     const idm = String(cb.name || '').match(/^checkBox_(\d+)$/);
     if (!idm) continue;
     const cells = [...tr.querySelectorAll('td')].map((td) => td.innerText.trim());
-    out.push({ cbName: cb.name, cbValue: cb.value, cbId: cb.id, sku: (cells[1] || '').split('\n')[0].trim(), productId: Number(idm[1]), name: (cells[2] || '').split('\n')[0].trim() });
+    out.push({ cbName: cb.name, cbValue: cb.value, cbId: cb.id, sku: (cells[1] || '').split('\n')[0].replace(/[ \s]+/g, ' ').trim(), productId: Number(idm[1]), name: (cells[2] || '').split('\n')[0].trim() });
   }
   return out;
 });
