@@ -18,7 +18,9 @@ import { config as bpConfig, login as bpLogin } from './brightpearl.js';
 export const config = { ...bpConfig };
 export const login = bpLogin;
 
-const searchUrl = (q) => `${config.base}/report.php?search=${encodeURIComponent(q)}&report_type=product_list&order_type=&search_type=products&date_from=01%2F01%2F2000&quicksearch=1&output=screen`;
+// The quick search only lists Live + Discontinued (28 Oct 2026: a whole night of "row not found");
+// the filter form's own params with ARCHIVED alone list only archived products.
+const searchUrl = (q) => `${config.base}/report.php?report_type=product_list&report_submit=1&search_products=${encodeURIComponent(q)}&productStatusId%5B%5D=ARCHIVED&multiselect_productStatusId=ARCHIVED&limit=50&results_from=1&output=screen`;
 
 // Every row on the list: its checkbox, the product id shown under the SKU, and the SKU text.
 const readRows = (page) => page.evaluate(() => {
