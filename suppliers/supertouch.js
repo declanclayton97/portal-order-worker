@@ -358,7 +358,7 @@ async function fillCheckout(page, { ref }) {
     return heading || btn;
   }).catch(() => false);
   let paymentOpen = false;
-  for (let i = 0; i < 15 && !(paymentOpen = await paymentIsOpen()); i++) await page.waitForTimeout(1000);
+  for (let i = 0; i < 45 && !(paymentOpen = await paymentIsOpen()); i++) await page.waitForTimeout(1000); // 15s missed it on PO 500279 twice (29 Oct)
   const pay = await page.evaluate(() => { const r = document.querySelector('input[name="pay_method"][value="sb_credit_account"]'); if (!r) return false; const row = r.closest('label') || r.parentElement; if (row) row.click(); if (!r.checked) { r.checked = true; window.jQuery && window.jQuery(r).trigger('click').trigger('change'); } return r.checked; }).catch(() => false);
   await page.waitForTimeout(1500);
   const terms = await page.evaluate(() => { const r = document.querySelector('#agree-terms'); if (!r) return false; if (!r.checked) { r.checked = true; window.jQuery && window.jQuery(r).trigger('change'); } return r.checked; }).catch(() => false);
