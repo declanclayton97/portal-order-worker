@@ -359,9 +359,30 @@ async function fillCheckout(page, { ref }) {
   }).catch(() => false);
   let paymentOpen = false;
   for (let i = 0; i < 45 && !(paymentOpen = await paymentIsOpen()); i++) await page.waitForTimeout(1000); // 15s missed it on PO 500279 twice (29 Oct)
-  const pay = await page.evaluate(() => { const r = document.querySelector('input[name="pay_method"][value="sb_credit_account"]'); if (!r) return false; const row = r.closest('label') || r.parentElement; if (row) row.click(); if (!r.checked) { r.checked = true; window.jQuery && window.jQuery(r).trigger('click').trigger('change'); } return r.checked; }).catch(() => false);
-  await page.waitForTimeout(1500);
-  const terms = await page.evaluate(() => { const r = document.querySelector('#agree-terms'); if (!r) return false; if (!r.checked) { r.checked = true; window.jQuery && window.jQuery(r).trigger('change'); } return r.checked; }).catch(() => false);
+  // REAL clicks, not r.checked = true. Placing PO 500279 by hand (29 Oct) the sidebar kept saying
+  // "Please select your payment method and accept T&Cs to continue" until the terms box was actually
+  // clicked; with the box only set by script, Continue to Payment showed its spinner and never sent
+  // /pay/gateway (4 worker attempts that day). The credit tile is clicked only if it is not already chosen.
+  const payTile = page.locator('input[name="pay_method"][value="sb_credit_account"]').first();
+  if (!(await payTile.isChecked().catch(() => false))) {
+    const tile = page.locator('label:has(input[name="pay_method"][value="sb_credit_account"]), :is(div,li,a):has(> input[name="pay_method"][value="sb_credit_account"])').first();
+    await tile.scrollIntoViewIfNeeded().catch(() => {});
+    await tile.click({ timeout: 8000 }).catch(() => {});
+    await page.waitForTimeout(1500);
+  }
+  const pay = await payTile.isChecked().catch(() => false);
+  const termsBox = page.locator('#agree-terms').first();
+  if (!(await termsBox.isChecked().catch(() => false))) {
+    await termsBox.scrollIntoViewIfNeeded().catch(() => {});
+    await termsBox.check({ timeout: 8000 }).catch(async () => {
+      // the box can be styled away; its label takes the click instead
+      await page.locator('label[for="agree-terms"]').first().click({ timeout: 5000 }).catch(() => {});
+    });
+    await page.waitForTimeout(1000);
+  }
+  const terms = await termsBox.isChecked().catch(() => false);
+  // The sidebar warning is the site's own verdict on whether it will accept Continue to Payment.
+  const sidebarWarning = await page.evaluate(() => [...document.querySelectorAll('*')].some((e) => e.children.length === 0 && /Please select your payment method and accept T&Cs/i.test(e.textContent || '') && e.offsetParent !== null)).catch(() => null);
   const state = await page.evaluate(() => {
     const v = (n) => (document.querySelector(`[name="${n}"]`) || {}).value;
     const txt = (document.body.innerText || '').replace(/\s+/g, ' ');
@@ -373,7 +394,7 @@ async function fillCheckout(page, { ref }) {
       errors: [...document.querySelectorAll('.has-error, .error, .alert-danger, .help-block')].map((e) => (e.innerText || '').trim()).filter(Boolean).slice(0, 10),
     };
   });
-  return { filled, delivery, chosenDelivery: standard[0], deliverySet, deliveryAttempts, validator, buttonsBefore, continued, visibleErrors, paymentOpen, creditAccount: pay, terms, state };
+  return { filled, delivery, chosenDelivery: standard[0], deliverySet, deliveryAttempts, validator, buttonsBefore, continued, visibleErrors, paymentOpen, creditAccount: pay, terms, sidebarWarning, state };
 }
 
 // Rehearsal: stage → fill the whole checkout → screenshot → empty our basket. Never clicks
@@ -416,6 +437,7 @@ export async function place(page, { ref, probe = false, retried = false } = {}) 
   if (!co.chosenDelivery || !/^Standard Delivery/i.test(co.chosenDelivery.label)) problems.push('delivery is not Standard Delivery');
   if (!co.paymentOpen) problems.push('payment section did not open');
   if (!co.terms) problems.push('terms box not ticked');
+  if (co.sidebarWarning) problems.push('site still says: select payment method and accept T&Cs');
   if (problems.length) {
     await emptyBasket(page).catch(() => {});
     return { placed: false, refused: 'checkout-check-failed', problems, checkout: co };
@@ -423,6 +445,11 @@ export async function place(page, { ref, probe = false, retried = false } = {}) 
   const btn = page.locator('button:has-text("Continue to Payment")').filter({ hasNot: page.locator('[disabled]') });
   const visible = [];
   for (const b of await btn.all()) if (await b.isVisible().catch(() => false)) visible.push(b);
+  // Press the one under the terms box (in the form), not the order-summary sidebar copy: that is the
+  // one a person presses, and the one that worked by hand on PO 500279.
+  const inForm = [];
+  for (const b of visible) if (await b.evaluate((el) => !!el.closest('form') && !el.closest('[class*="sidebar" i], [class*="summary" i], aside')).catch(() => false)) inForm.push(b);
+  if (inForm.length) visible.splice(0, visible.length, ...inForm);
   if (!visible.length) { await emptyBasket(page).catch(() => {}); return { placed: false, refused: 'no-enabled-continue-to-payment', checkout: co }; }
   // "Continue to Payment" does NOT place the order. It shows "This may take a moment", then opens a
   // second page, /pay/instance — "Pay Via Credit Account" with the balance after purchase, its OWN
