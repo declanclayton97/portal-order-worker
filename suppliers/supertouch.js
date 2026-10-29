@@ -404,7 +404,7 @@ export async function clearOurRehearsal(page, { expect = [], subtotal = null } =
 // Fills the checkout, re-verifies every value, then clicks "Continue to Payment" EXACTLY ONCE. The
 // account pays by credit account, so that click is the order. Never retried here: a caller must
 // check ordersList for our ref before any second attempt.
-export async function place(page, { ref, probe = false } = {}) {
+export async function place(page, { ref, probe = false, retried = false } = {}) {
   if (!ref) throw new Error('place needs our PO number as ref');
   const co = await fillCheckout(page, { ref });
   const st = co.state || {};
@@ -450,6 +450,14 @@ export async function place(page, { ref, probe = false } = {}) {
   }).catch(() => ({}));
   if (!reachedInstance || !inst.creditAccount || !inst.button) {
     // Complete Purchase was never clicked, so nothing was ordered.
+    // PO 500279 (29 Oct 13:45): the click landed back on /pay instead of /pay/instance; the same
+    // lines reached Complete Purchase on a probe minutes later. Continue to Payment orders nothing
+    // (only COMPLETE PURCHASE does), so go round ONCE more - refilling and re-checking the whole
+    // checkout, since the bounce may have reset delivery/payment - with the basket still ours.
+    if (!retried && /^\/pay\/?$/i.test(new URL(page.url()).pathname)) {
+      const again = await place(page, { ref, probe, retried: true });
+      return { ...again, firstAttempt: { instance: inst, trail: { nav: trail.nav, posts: trail.posts.map((p) => ({ url: p.url, status: p.status })), console: trail.console, visibleErrors: trail.visibleErrors } } };
+    }
     await emptyBasket(page).catch(() => {});
     return { placed: false, refused: 'no-complete-purchase-page', instance: inst, trail, checkout: co };
   }
