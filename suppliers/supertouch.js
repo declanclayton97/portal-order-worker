@@ -437,7 +437,12 @@ export async function place(page, { ref, probe = false, retried = false } = {}) 
   const onConsole = (m) => { if (m.type() === 'error') trail.console.push(m.text().slice(0, 300)); };
   page.on('framenavigated', onNav); page.on('response', onResp); page.on('dialog', onDialog); page.on('console', onConsole);
   await visible[0].click({ timeout: 10000 });
-  const reachedInstance = await page.waitForURL(/\/pay\/instance/i, { timeout: 90000 }).then(() => true).catch(() => false);
+  // Their gateway can take minutes: PO 500279's 14:25 attempt was still on the "This may take a
+  // moment" spinner at 90s with no /pay/gateway reply yet. Wait up to 4 minutes for the instance page.
+  const onReq = (q) => { try { if (q.method() === 'POST' && /\/pay\//i.test(q.url())) trail.sent = [...(trail.sent || []), { t: Date.now(), url: q.url().slice(0, 120) }]; } catch {} };
+  page.on('request', onReq);
+  const reachedInstance = await page.waitForURL(/\/pay\/instance/i, { timeout: 240000 }).then(() => true).catch(() => false);
+  page.off('request', onReq);
   await page.waitForTimeout(1500);
   page.off('framenavigated', onNav); page.off('response', onResp); page.off('dialog', onDialog); page.off('console', onConsole);
   trail.visibleErrors = await page.evaluate(() => [...document.querySelectorAll('.has-error, .alert, .alert-danger, .help-block, .invalid-feedback, .snackbar, [class*="error" i], [class*="notice" i]')]
