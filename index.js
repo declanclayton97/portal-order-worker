@@ -139,6 +139,8 @@ async function runOrderInner({ supplier, ref, lines, opts = {}, execute }) {
     if (!execute && opts.testRun && mod.testRun) { const tr = await mod.testRun(page); await closeQuietly(browser); return { ok: true, dryRun: true, supplier, ref, ...staged, ...tr, ms: Date.now() - t0 }; }
     if (!execute) { await closeQuietly(browser); return { ok: true, dryRun: true, supplier, ref, ...staged, ms: Date.now() - t0 }; }
     if (!staged.ready) { await closeQuietly(browser); return { ok: false, error: 'not ready to place', supplier, ref, ...staged }; }
+    // Supertouch: walk to the Complete Purchase page and stop (orders nothing, empties the basket).
+    if (opts.payProbe) { const pp = await mod.place(page, { ref, probe: true }); await closeQuietly(browser); return { ok: true, payProbe: true, supplier, ref, ...staged, ...pp, ms: Date.now() - t0 }; }
     const placed = await mod.place(page, { ref });
     await closeQuietly(browser);
     return { ok: true, supplier, ref, ...staged, ...placed, ms: Date.now() - t0 };

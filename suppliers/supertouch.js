@@ -404,7 +404,7 @@ export async function clearOurRehearsal(page, { expect = [], subtotal = null } =
 // Fills the checkout, re-verifies every value, then clicks "Continue to Payment" EXACTLY ONCE. The
 // account pays by credit account, so that click is the order. Never retried here: a caller must
 // check ordersList for our ref before any second attempt.
-export async function place(page, { ref } = {}) {
+export async function place(page, { ref, probe = false } = {}) {
   if (!ref) throw new Error('place needs our PO number as ref');
   const co = await fillCheckout(page, { ref });
   const st = co.state || {};
@@ -428,9 +428,21 @@ export async function place(page, { ref } = {}) {
   // second page, /pay/instance — "Pay Via Credit Account" with the balance after purchase, its OWN
   // unticked terms box and a "COMPLETE PURCHASE" button. That button places it (walked by hand in
   // Dec's Chrome 26 Oct 2026, order 1000319173). Until it is clicked nothing is ordered.
+  // Record what the click actually does: PO 500279 (29 Oct) sat 90s and ended on /pay?_gl=... with
+  // nothing to say why, so every navigation, POST reply, dialog and console error is kept.
+  const trail = { nav: [], posts: [], dialogs: [], console: [] };
+  const onNav = (f) => { if (f === page.mainFrame()) trail.nav.push({ t: Date.now(), url: f.url().slice(0, 200) }); };
+  const onResp = async (r) => { try { if (r.request().method() !== 'POST') return; const u = r.url(); if (/google|analytics|pagesense|elfsight|facebook|clarity/i.test(u)) return; let body = ''; try { body = (await r.text()).slice(0, 600); } catch {} trail.posts.push({ url: u.slice(0, 200), status: r.status(), body }); } catch {} };
+  const onDialog = (d) => { trail.dialogs.push(d.message().slice(0, 300)); d.dismiss().catch(() => {}); };
+  const onConsole = (m) => { if (m.type() === 'error') trail.console.push(m.text().slice(0, 300)); };
+  page.on('framenavigated', onNav); page.on('response', onResp); page.on('dialog', onDialog); page.on('console', onConsole);
   await visible[0].click({ timeout: 10000 });
   const reachedInstance = await page.waitForURL(/\/pay\/instance/i, { timeout: 90000 }).then(() => true).catch(() => false);
   await page.waitForTimeout(1500);
+  page.off('framenavigated', onNav); page.off('response', onResp); page.off('dialog', onDialog); page.off('console', onConsole);
+  trail.visibleErrors = await page.evaluate(() => [...document.querySelectorAll('.has-error, .alert, .alert-danger, .help-block, .invalid-feedback, .snackbar, [class*="error" i], [class*="notice" i]')]
+    .filter((e) => e.offsetParent !== null && (e.innerText || '').trim()).map((e) => (e.innerText || '').trim().slice(0, 200)).slice(0, 15)).catch(() => []);
+  trail.shot = await page.screenshot({ fullPage: true, type: 'jpeg', quality: 50 }).then((b) => `data:image/jpeg;base64,${b.toString('base64')}`).catch(() => null);
   const inst = await page.evaluate(() => {
     const t = (document.body.innerText || '').replace(/\s+/g, ' ');
     const b = document.querySelector('button.complete-purchase');
@@ -439,8 +451,10 @@ export async function place(page, { ref } = {}) {
   if (!reachedInstance || !inst.creditAccount || !inst.button) {
     // Complete Purchase was never clicked, so nothing was ordered.
     await emptyBasket(page).catch(() => {});
-    return { placed: false, refused: 'no-complete-purchase-page', instance: inst, checkout: co };
+    return { placed: false, refused: 'no-complete-purchase-page', instance: inst, trail, checkout: co };
   }
+  // Probe: the Complete Purchase page opened — stop here, nothing ordered, basket emptied.
+  if (probe) { await emptyBasket(page).catch(() => {}); return { placed: false, probe: true, reachedCompletePurchase: true, instance: inst, trail, checkout: co }; }
   const termsBox = page.locator('#agree-terms').first();
   if (!(await termsBox.isChecked().catch(() => false))) await termsBox.check({ force: true }).catch(() => {});
   if (!(await termsBox.isChecked().catch(() => false))) {
@@ -459,13 +473,15 @@ export async function place(page, { ref } = {}) {
   let listed = null;
   try { listed = await ordersList(page, { ref }); } catch (e) { listed = { error: String(e.message || e) }; }
   const orderRef = (m && m[1]) || (listed && listed.matches && listed.matches[0] && listed.matches[0].ourRef) || null;
-  return { placed: !!(thanked || (listed && listed.matches && listed.matches.length)), orderRef, thanked, after: { url: after.url, text: after.text.slice(0, 800) }, listed, shot, checkout: { chosenDelivery: co.chosenDelivery, state: st } };
+  return { placed: !!(thanked || (listed && listed.matches && listed.matches.length)), orderRef, thanked, trail: { nav: trail.nav, posts: trail.posts.slice(0, 10) }, after: { url: after.url, text: after.text.slice(0, 800) }, listed, shot, checkout: { chosenDelivery: co.chosenDelivery, state: st } };
 }
 
 // Sales Orders: rows whose "Your Ref" is our PO. The table is drawn by script after load.
 export async function ordersList(page, { ref = null } = {}) {
   await page.goto(`${BASE}/account/pages/sales-orders`, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForFunction(() => document.querySelectorAll('table tbody tr').length > 0 || /no orders/i.test(document.body.innerText || ''), null, { timeout: 30000 }).catch(() => {});
+  // Wait for REAL rows (>= 5 cells). The table is fed by script and its first state is a single
+  // placeholder row, which read as one blank order on 29 Oct (the list held 45).
+  await page.waitForFunction(() => [...document.querySelectorAll('table tbody tr')].some((tr) => tr.querySelectorAll('td').length >= 5) || /no orders/i.test(document.body.innerText || ''), null, { timeout: 75000 }).catch(() => {});
   await page.waitForTimeout(1500);
   const rows = await page.evaluate(() => {
     const t = [...document.querySelectorAll('table')].find((x) => /Your Ref/i.test(x.innerText || ''));
@@ -474,7 +490,9 @@ export async function ordersList(page, { ref = null } = {}) {
     return [...t.querySelectorAll('tbody tr')].map((tr) => { const c = [...tr.querySelectorAll('td')].map((td) => (td.innerText || '').trim()); const o = {}; head.forEach((h, i) => { o[h] = c[i]; }); return o; }).slice(0, 40);
   });
   const pick = (o, re) => { const k = Object.keys(o).find((x) => re.test(x)); return k ? o[k] : null; };
-  const norm = rows.map((o) => ({ ourRef: pick(o, /Our Ref/i), date: pick(o, /Date/i), yourRef: pick(o, /Your Ref/i), status: pick(o, /Status/i), net: pick(o, /NET/i) }));
+  const real = rows.filter((o) => Object.values(o).filter((v) => v).length >= 3);
+  if (!real.length) throw new Error('Supertouch sales-orders table did not load - cannot say whether the order exists');
+  const norm = real.map((o) => ({ ourRef: pick(o, /Our Ref/i), date: pick(o, /Date/i), yourRef: pick(o, /Your Ref/i), status: pick(o, /Status/i), net: pick(o, /NET/i) }));
   // "Your Ref" is shown as "<our PO> <date> <their counter>" (e.g. "498829 2026-10-26 6340"), so match the first token.
   const matches = ref ? norm.filter((r) => String(r.yourRef || '').trim().split(/\s+/)[0].toUpperCase() === String(ref).trim().toUpperCase()) : [];
   return { rows: norm.slice(0, 15), matches };
