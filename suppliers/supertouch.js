@@ -186,7 +186,9 @@ async function quickAdd(page, lines, opts = {}) {
       msg: ((r.querySelector('.bulk-add-to-basket-status-box') || {}).innerText || '').trim().slice(0, 120),
       busy: !!r.querySelector('.fa-spin'), multiple: !!r.querySelector('.bulk-add-to-basket-multiple-options'),
     })).filter((x) => x.code));
-    if (status.length >= lines.length && status.every((x) => !x.busy)) break;
+    // A row with no answer yet (not valid, no message, no spinner) has not been checked: a single-line
+    // order read here straight after the blur and refused itself (PO 502208, 61162 x56, blank status).
+    if (status.length >= lines.length && status.every((x) => !x.busy && (x.valid || x.msg || x.multiple))) break;
     await page.waitForTimeout(500);
   }
   const notValid = status.filter((x) => !x.valid);
