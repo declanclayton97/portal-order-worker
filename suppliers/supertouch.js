@@ -104,6 +104,16 @@ export async function login(page, { user, pass }) {
   if (await page.locator('.cookie-pop-up-wrapper').first().isVisible().catch(() => false)) {
     await page.evaluate(() => document.querySelectorAll('.cookie-pop-up-wrapper').forEach((w) => { w.style.display = 'none'; })).catch(() => {});
   }
+  // The "Notice for Existing Account Holders" popup can also be drawn LATE - after the early close
+  // above - and then covers Login (19 Nov 2026 14:47 forced run). Close it again with its ×, and if it
+  // is still there hide it. Never press its "Recreate Password" button.
+  if (await notice.first().isVisible().catch(() => false)) {
+    await notice.locator('.popup-modal__close-btn').first().click({ timeout: 3000 }).catch(() => {});
+    await notice.first().waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {});
+    if (await notice.first().isVisible().catch(() => false)) {
+      await page.evaluate(() => document.querySelectorAll('.popup-modal.on-page-load').forEach((m) => { m.style.display = 'none'; })).catch(() => {});
+    }
+  }
   await Promise.all([
     page.waitForLoadState('domcontentloaded', { timeout: 45000 }).catch(() => {}),
     page.click('#login-form button[name="login"]'),
