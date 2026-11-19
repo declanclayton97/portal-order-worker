@@ -29,14 +29,33 @@ async function loggedIn(page) {
   }).catch(() => ({ logoutLink: false, passwordBoxShown: true }));
 }
 
+// 19 Nov 2026: a SECOND cookie bar appeared - a fixed strip along the bottom ("We use cookies to give
+// you the best possible experience ... Accept All / Preferences") that sits over the main banner's
+// "Confirm my choices" button, so that click failed silently and the main banner then covered Login
+// (Supertouch 13:45 preflight timed out). It records no consent we need, so take it off the page.
+async function dropCookieBar(page) {
+  await page.evaluate(() => {
+    for (const el of document.querySelectorAll('body *')) {
+      if (!el.isConnected || el.closest('.cookie-pop-up-wrapper') || el.querySelector('.cookie-pop-up-wrapper')) continue;
+      const pos = getComputedStyle(el).position;
+      if ((pos === 'fixed' || pos === 'sticky') && /we use cookies to give you the best possible experience/i.test(el.textContent || '')) el.remove();
+    }
+  }).catch(() => {});
+}
+
 // Essential cookies only: "Let me choose", leave the optional boxes unticked, "Confirm my choices".
-// Safe to call when no banner is showing.
+// Safe to call when no banner is showing. The banner may open ALREADY expanded (no "Let me choose"
+// button, the toggles and "Confirm my choices" showing - seen 19 Nov 2026), so act on either state.
 async function answerCookies(page) {
-  if (!(await page.locator('#let-me-choose').isVisible().catch(() => false))) return false;
-  await page.click('#let-me-choose').catch(() => {});
+  await dropCookieBar(page);
+  const choose = await page.locator('#let-me-choose').isVisible().catch(() => false);
+  const confirm = page.locator('#cookie-confirm-choices');
+  if (!choose && !(await confirm.isVisible().catch(() => false))) return false;
+  if (choose) await page.click('#let-me-choose').catch(() => {});
   for (const n of ['performance_and_analytics', 'functional', 'advertising']) await page.uncheck(`input.cookie-checkbox[name="${n}"]`).catch(() => {});
-  await page.click('#cookie-confirm-choices').catch(() => {});
+  await confirm.click({ timeout: 5000 }).catch(() => confirm.click({ force: true, timeout: 5000 }).catch(() => {}));
   await page.locator('.cookie-pop-up-wrapper').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+  await dropCookieBar(page);
   return true;
 }
 
@@ -80,6 +99,11 @@ export async function login(page, { user, pass }) {
   // The banner can be drawn AFTER the 10s wait above (26 Oct 2026: it covered Login and the click
   // timed out), so answer it again right before clicking.
   await answerCookies(page);
+  // Last resort: if a cookie banner still covers the form, hide it. Hiding records no consent at all,
+  // which is the same as essential-only; the alternative is a 30s click timeout and a failed run.
+  if (await page.locator('.cookie-pop-up-wrapper').first().isVisible().catch(() => false)) {
+    await page.evaluate(() => document.querySelectorAll('.cookie-pop-up-wrapper').forEach((w) => { w.style.display = 'none'; })).catch(() => {});
+  }
   await Promise.all([
     page.waitForLoadState('domcontentloaded', { timeout: 45000 }).catch(() => {}),
     page.click('#login-form button[name="login"]'),
